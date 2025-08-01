@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="A new Flutter project.">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="examtopic_reviewer">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <!-- Google Sign-In client_id for web -->
+  <meta name="google-signin-client_id" content="578104498344-c0mb5ud49lvc6e7bvc7nvnqrkcc2gv52.apps.googleusercontent.com">
+  
+  <!-- Content Security Policy to allow images from external sources -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.gstatic.com https://apis.google.com https://accounts.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; connect-src 'self' https: http: https://www.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://fcm.googleapis.com https://storage.googleapis.com https://accounts.google.com; font-src 'self' data:;">
+  
+  <!-- Additional meta tags for better mobile support -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="format-detection" content="telephone=no">
+  
+  <title>examtopic_reviewer</title>
+  <link rel="manifest" href="manifest.json">
+  
+  <!-- Google Sign-In API -->
+  <script src="https://apis.google.com/js/platform.js" async defer></script>
+  
+  <script>
+    // Handle 404 errors and redirect to library page
+    window.addEventListener('error', function(e) {
+      if (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK') {
+        // Resource not found, redirect to library
+        window.location.href = '/library';
+      }
+    });
+    
+    // Handle navigation errors
+    window.addEventListener('unhandledrejection', function(event) {
+      if (event.reason && event.reason.toString().includes('Exam not found')) {
+        window.location.href = '/library';
+      }
+    });
+    
+    // Handle image loading errors for mobile browsers
+    window.addEventListener('load', function() {
+      // Add CORS headers for image requests
+      const originalFetch = window.fetch;
+      window.fetch = function(url, options = {}) {
+        if (typeof url === 'string' && (url.includes('.jpg') || url.includes('.jpeg') || url.includes('.png') || url.includes('.gif') || url.includes('.webp'))) {
+          options.mode = 'cors';
+          options.credentials = 'omit';
+        }
+        return originalFetch(url, options);
+      };
+      
+      // Override Image constructor to handle CORS
+      const OriginalImage = window.Image;
+      window.Image = function() {
+        const img = new OriginalImage();
+        img.crossOrigin = 'anonymous';
+        return img;
+      };
+      window.Image.prototype = OriginalImage.prototype;
+    });
+  </script>
+</head>
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
