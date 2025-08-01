@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: examtopic_reviewer_api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn api.health:app --config gunicorn.conf.py
+    envVars:
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+    region: singapore
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+version: "1" 
