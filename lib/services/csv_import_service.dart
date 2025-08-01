@@ -257,12 +257,30 @@ class CsvImportService {
         .where((e) => e.isNotEmpty)
         .toList();
 
-    // Parse answers
-    final answers = answersStr
+    // Parse answers and convert letter answers to full text
+    final rawAnswers = answersStr
         .split('|')
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
         .toList();
+
+    // Convert letter answers (A, B, C, D) to full option text
+    final answers = <String>[];
+    for (final answer in rawAnswers) {
+      if (answer.length == 1 && RegExp(r'^[A-Z]$').hasMatch(answer)) {
+        // This is a letter answer, find the corresponding option
+        final optionIndex = answer.codeUnitAt(0) - 'A'.codeUnitAt(0);
+        if (optionIndex >= 0 && optionIndex < options.length) {
+          answers.add(options[optionIndex]);
+        } else {
+          // If option not found, keep the letter
+          answers.add(answer);
+        }
+      } else {
+        // This is already a full text answer
+        answers.add(answer);
+      }
+    }
 
     return {
       'question': ExamQuestion(
@@ -313,7 +331,9 @@ class CsvImportService {
         if (result['success'] == true && result['processedImages'] != null) {
           final processedImages = result['processedImages'] as List;
           if (processedImages.isNotEmpty) {
-            final processedUrl = ServerConfig.getProcessedImageUrl(processedImages.first);
+            final processedUrl = ServerConfig.getProcessedImageUrl(
+              processedImages.first,
+            );
             print('Successfully processed image: $processedUrl');
             return {'success': true, 'base64': processedUrl, 'size_bytes': 0};
           }
