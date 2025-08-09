@@ -7,7 +7,7 @@ from urllib.parse import urlparse, quote
 import mimetypes
 from datetime import datetime
 import logging
-# Try to import Cloudinary (optional for local development)
+# Import Cloudinary SDK (now properly installed)
 try:
     import cloudinary
     import cloudinary.uploader
@@ -16,7 +16,6 @@ try:
     import cloudinary.exceptions
     CLOUDINARY_AVAILABLE = True
 except ImportError:
-    # Cloudinary not available - this is OK for local development
     CLOUDINARY_AVAILABLE = False
     cloudinary = None
 
@@ -32,7 +31,7 @@ IMAGES_DIR = 'processed_images'
 ALLOWED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB limit
 
-# Configure Cloudinary
+# Configure Cloudinary SDK
 CLOUDINARY_ENABLED = False
 if CLOUDINARY_AVAILABLE:
     try:
