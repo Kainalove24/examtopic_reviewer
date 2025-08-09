@@ -681,7 +681,7 @@ class _EnhancedCsvImportScreenState extends State<EnhancedCsvImportScreen> {
 
       // Create exam object
       final exam = ImportedExam(
-        id: existingExam.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
+        id: existingExam.id,
         title: _examName!,
         filename: _csvFileName!,
         importedAt: DateTime.now(),
@@ -711,7 +711,7 @@ class _EnhancedCsvImportScreenState extends State<EnhancedCsvImportScreen> {
       final examData = {
         'id': exam.id,
         'title': _examName!,
-        'questions': examQuestions.map((q) => q.toMap()!).toList(),
+        'questions': examQuestions.map((q) => q.toMap()).toList(),
         'questionCount': _parsedQuestions.length,
         'category': 'User Import',
         'importDate': DateTime.now().toIso8601String(),

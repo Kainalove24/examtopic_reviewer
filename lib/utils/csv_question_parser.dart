@@ -101,9 +101,6 @@ List<Question> parseQuestionsFromCsv(String csvContent) {
       }
     } else if (_parseType(type) == 'hotspot') {
       // Hotspot: correct is option text separated by pipes
-      print('Debug CSV Parser: Processing hotspot question');
-      print('Debug CSV Parser: correctStr: "$correctStr"');
-      print('Debug CSV Parser: options: $options');
 
       for (int j = 0; j < options.length; j++) {
         choices.add(Choice(text: options[j], isCorrect: false));

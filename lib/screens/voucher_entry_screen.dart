@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../services/admin_service.dart';
 import '../services/firebase_voucher_service.dart';
 import '../models/voucher.dart';
+import 'package:firebase_auth/firebase_auth.dart'; // Added for guest user check
 
 class VoucherEntryScreen extends StatefulWidget {
   const VoucherEntryScreen({super.key});
@@ -103,8 +104,18 @@ class _VoucherEntryScreenState extends State<VoucherEntryScreen> {
           } else {
             examInfo = '\n🎯 General voucher (unlocks all exams)';
           }
+
+          // Check if user is guest and add login requirement notice
+          final user = FirebaseAuth.instance.currentUser;
+          final isGuest = user == null || user.isAnonymous;
+          String loginNotice = '';
+          if (isGuest) {
+            loginNotice =
+                '\n⚠️ Login required to redeem this voucher and prevent data loss.';
+          }
+
           _validationMessage =
-              '✅ Cloud voucher is valid! You can now redeem it.$examInfo';
+              '✅ Cloud voucher is valid! You can now redeem it.$examInfo$loginNotice';
           _currentVoucher = cloudVoucher;
         });
       } else {
@@ -134,12 +145,39 @@ class _VoucherEntryScreenState extends State<VoucherEntryScreen> {
 
     setState(() {
       _isValidating = true;
-      _validationMessage = 'Redeeming voucher...';
+      _validationMessage = 'Checking user status...';
     });
 
     try {
-      final userId =
-          'user_${DateTime.now().millisecondsSinceEpoch}'; // Simple user ID
+      // Check if user is guest (not authenticated)
+      final user = FirebaseAuth.instance.currentUser;
+      final isGuest = user == null || user.isAnonymous;
+
+      if (isGuest) {
+        // Guest user - prompt to log in
+        setState(() {
+          _isValidating = false;
+          _validationMessage =
+              'Please log in to redeem this voucher and prevent data loss.';
+        });
+
+        // Show login prompt dialog
+        final shouldLogin = await _showLoginPromptDialog();
+        if (shouldLogin) {
+          // Navigate to auth screen
+          if (mounted) {
+            context.go('/auth');
+          }
+        }
+        return; // Don't proceed with redemption
+      }
+
+      // User is authenticated - proceed with redemption
+      setState(() {
+        _validationMessage = 'Redeeming voucher...';
+      });
+
+      final userId = user.uid; // Use actual user ID
 
       // Use AdminService to handle embedded exam data
       bool success = await AdminService.useVoucher(
@@ -197,6 +235,114 @@ class _VoucherEntryScreenState extends State<VoucherEntryScreen> {
     }
   }
 
+  // Show login prompt dialog
+  Future<bool> _showLoginPromptDialog() async {
+    return await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => AlertDialog(
+            title: Row(
+              children: [
+                Icon(Icons.warning, color: Colors.orange, size: 24),
+                SizedBox(width: 8),
+                Text('Login Required'),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'To redeem this voucher and prevent data loss, you need to log in.',
+                  style: TextStyle(fontSize: 16),
+                ),
+                SizedBox(height: 16),
+                Container(
+                  padding: EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.blue[50],
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.blue[200]!),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.info_outline,
+                            color: Colors.blue[700],
+                            size: 16,
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            'Why login is required:',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.blue[700],
+                            ),
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        '• Your unlocked exams will be saved to the cloud\n'
+                        '• You can access them from any device\n'
+                        '• Your progress will be synchronized\n'
+                        '• No risk of losing data if you switch devices',
+                        style: TextStyle(fontSize: 12, color: Colors.blue[700]),
+                      ),
+                    ],
+                  ),
+                ),
+                SizedBox(height: 16),
+                Text(
+                  'Your voucher will remain valid and can be redeemed after logging in.',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontStyle: FontStyle.italic,
+                    color: Colors.grey[600],
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                ),
+                child: Text('Log In'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  String _formatExpiryDuration(Duration? duration) {
+    if (duration == null) return 'No expiry (Permanent)';
+
+    if (duration.inDays == 0) {
+      return '${duration.inHours} hours';
+    } else if (duration.inDays == 1) {
+      return '1 day';
+    } else if (duration.inDays < 7) {
+      return '${duration.inDays} days';
+    } else if (duration.inDays < 30) {
+      final weeks = (duration.inDays / 7).round();
+      return '$weeks week${weeks > 1 ? 's' : ''}';
+    } else {
+      final months = (duration.inDays / 30).round();
+      return '$months month${months > 1 ? 's' : ''}';
+    }
+  }
+
   Future<void> _copyVoucherCode() async {
     if (_currentVoucher == null) return;
 
@@ -228,10 +374,10 @@ class _VoucherEntryScreenState extends State<VoucherEntryScreen> {
         backgroundColor: Colors.deepPurple,
         foregroundColor: Colors.white,
       ),
-      body: Padding(
+      body: SingleChildScrollView(
         padding: EdgeInsets.all(24.0),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisAlignment: MainAxisAlignment.start,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Header
@@ -363,7 +509,18 @@ class _VoucherEntryScreenState extends State<VoucherEntryScreen> {
                               backgroundColor: Colors.green,
                               foregroundColor: Colors.white,
                             ),
-                            child: Text('Redeem Voucher'),
+                            child: Text(
+                              // Check if user is guest and show appropriate text
+                              () {
+                                if (!_isValid) return 'Redeem Voucher';
+                                final user = FirebaseAuth.instance.currentUser;
+                                final isGuest =
+                                    user == null || user.isAnonymous;
+                                return isGuest
+                                    ? 'Login to Redeem'
+                                    : 'Redeem Voucher';
+                              }(),
+                            ),
                           ),
                         ),
                       ],
@@ -425,6 +582,15 @@ class _VoucherEntryScreenState extends State<VoucherEntryScreen> {
                       Text(
                         'Expires: ${_currentVoucher!.expiryDate.toString().split('.')[0]}',
                       ),
+                      if (_currentVoucher!.examExpiryDuration != null) ...[
+                        Text(
+                          'Exam Access: ${_formatExpiryDuration(_currentVoucher!.examExpiryDuration)}',
+                          style: TextStyle(
+                            color: Colors.blue[700],
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
                       Text(
                         'Status: ACTIVE',
                         style: TextStyle(
@@ -432,19 +598,55 @@ class _VoucherEntryScreenState extends State<VoucherEntryScreen> {
                           fontWeight: FontWeight.bold,
                         ),
                       ),
+                      // Show login requirement for guest users
+                      if (() {
+                        final user = FirebaseAuth.instance.currentUser;
+                        final isGuest = user == null || user.isAnonymous;
+                        return isGuest;
+                      }()) ...[
+                        SizedBox(height: 12),
+                        Container(
+                          padding: EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.orange[50],
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.orange[200]!),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.warning,
+                                color: Colors.orange[700],
+                                size: 20,
+                              ),
+                              SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Login required to redeem this voucher and prevent data loss.',
+                                  style: TextStyle(
+                                    color: Colors.orange[700],
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
               ),
 
-            Spacer(),
+            SizedBox(height: 32),
 
             // Footer
             Text(
-              'Vouchers are valid for 3 months and can only be used once',
+              'Vouchers can only be used once and have varying expiry durations',
               style: TextStyle(fontSize: 12, color: Colors.grey[500]),
               textAlign: TextAlign.center,
             ),
+            SizedBox(height: 16), // Extra padding at bottom
           ],
         ),
       ),

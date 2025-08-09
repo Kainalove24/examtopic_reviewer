@@ -60,6 +60,7 @@ class _CloudVoucherManagementScreenState
   Future<void> _generateCloudVoucher() async {
     final nameController = TextEditingController();
     String? selectedExamId;
+    Duration? selectedExpiryDuration;
     List<Map<String, dynamic>> importedExams = [];
 
     // Load imported exams for dropdown
@@ -69,7 +70,7 @@ class _CloudVoucherManagementScreenState
       print('Error loading imported exams: $e');
     }
 
-    final result = await showDialog<Map<String, String>>(
+    final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setState) => AlertDialog(
@@ -81,7 +82,7 @@ class _CloudVoucherManagementScreenState
             ],
           ),
           content: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: 400, maxHeight: 500),
+            constraints: BoxConstraints(maxWidth: 400, maxHeight: 600),
             child: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -176,7 +177,7 @@ class _CloudVoucherManagementScreenState
                                 ],
                               ),
                             );
-                          }).toList(),
+                          }),
                         ],
                         onChanged: (value) {
                           setState(() {
@@ -216,6 +217,115 @@ class _CloudVoucherManagementScreenState
                       ),
                     ),
                   ],
+
+                  SizedBox(height: 16),
+
+                  // Expiry Duration Selection
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Voucher Expiry Duration',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      SizedBox(height: 8),
+                      DropdownButtonFormField<Duration?>(
+                        value: selectedExpiryDuration,
+                        decoration: InputDecoration(
+                          labelText: 'Select expiry duration',
+                          hintText: 'Choose when the voucher expires',
+                          prefixIcon: Icon(Icons.access_time),
+                          border: OutlineInputBorder(),
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                          isDense: true,
+                        ),
+                        items: [
+                          DropdownMenuItem<Duration?>(
+                            value: null,
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.all_inclusive,
+                                  color: Colors.green,
+                                  size: 16,
+                                ),
+                                SizedBox(width: 8),
+                                Text('No Expiry (Permanent)'),
+                              ],
+                            ),
+                          ),
+                          DropdownMenuItem<Duration?>(
+                            value: Duration(days: 3),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.access_time,
+                                  color: Colors.red,
+                                  size: 16,
+                                ),
+                                SizedBox(width: 8),
+                                Text('3 Days'),
+                              ],
+                            ),
+                          ),
+                          DropdownMenuItem<Duration?>(
+                            value: Duration(days: 7),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.access_time,
+                                  color: Colors.orange,
+                                  size: 16,
+                                ),
+                                SizedBox(width: 8),
+                                Text('7 Days'),
+                              ],
+                            ),
+                          ),
+                          DropdownMenuItem<Duration?>(
+                            value: Duration(days: 30),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.access_time,
+                                  color: Colors.blue,
+                                  size: 16,
+                                ),
+                                SizedBox(width: 8),
+                                Text('1 Month'),
+                              ],
+                            ),
+                          ),
+                          DropdownMenuItem<Duration?>(
+                            value: Duration(days: 90),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.access_time,
+                                  color: Colors.purple,
+                                  size: 16,
+                                ),
+                                SizedBox(width: 8),
+                                Text('3 Months (Default)'),
+                              ],
+                            ),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          setState(() {
+                            selectedExpiryDuration = value;
+                          });
+                        },
+                        isExpanded: true,
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -230,6 +340,7 @@ class _CloudVoucherManagementScreenState
                 Navigator.of(context).pop({
                   'name': nameController.text.trim(),
                   'examId': selectedExamId ?? '',
+                  'expiryDuration': selectedExpiryDuration,
                 });
               },
               style: ElevatedButton.styleFrom(
@@ -252,7 +363,7 @@ class _CloudVoucherManagementScreenState
         final voucher = await AdminService.generateVoucher(
           name: result['name']!.isNotEmpty ? result['name'] : null,
           examId: result['examId']!.isNotEmpty ? result['examId'] : null,
-          examExpiryDuration: Duration(days: 90), // 3 months expiry
+          examExpiryDuration: result['expiryDuration'] as Duration?,
         );
 
         if (voucher != null) {
@@ -747,6 +858,7 @@ class _CloudVoucherManagementScreenState
                   trailing: PopupMenuButton(
                     itemBuilder: (context) => [
                       PopupMenuItem(
+                        value: 'copy',
                         child: Row(
                           children: [
                             Icon(Icons.copy, size: 16),
@@ -754,11 +866,11 @@ class _CloudVoucherManagementScreenState
                             Text('Copy Code'),
                           ],
                         ),
-                        value: 'copy',
                       ),
                       // Only show delete option for unused vouchers
                       if (!voucher.isUsed)
                         PopupMenuItem(
+                          value: 'delete',
                           child: Row(
                             children: [
                               Icon(Icons.delete, size: 16, color: Colors.red),
@@ -769,7 +881,6 @@ class _CloudVoucherManagementScreenState
                               ),
                             ],
                           ),
-                          value: 'delete',
                         ),
                     ],
                     onSelected: (value) {

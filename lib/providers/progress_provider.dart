@@ -52,22 +52,22 @@ class ProgressProvider extends ChangeNotifier {
 
       if (cloudDoc.exists) {
         final cloudProgress = cloudDoc.data()!;
-        
+
         // Merge cloud and local progress, prioritizing cloud data
         final mergedProgress = <String, dynamic>{};
-        
+
         // Add cloud progress first (takes priority)
         mergedProgress.addAll(cloudProgress);
-        
+
         // Add local progress for fields not in cloud
         for (final entry in localProgress.entries) {
           if (!mergedProgress.containsKey(entry.key)) {
             mergedProgress[entry.key] = entry.value;
           }
         }
-        
+
         progress = mergedProgress;
-        
+
         // Upload merged progress back to cloud
         await _firestore
             .collection('user_progress')
@@ -75,9 +75,12 @@ class ProgressProvider extends ChangeNotifier {
             .collection('exams')
             .doc(examId)
             .set(mergedProgress);
-            
+
         // Update local storage
-        await prefs.setString('progress_$examId', await _encode(mergedProgress));
+        await prefs.setString(
+          'progress_$examId',
+          await _encode(mergedProgress),
+        );
       } else {
         // No cloud data, use local data and upload to cloud
         progress = localProgress;
@@ -105,11 +108,11 @@ class ProgressProvider extends ChangeNotifier {
 
   Future<void> saveProgress(String examId) async {
     final user = _auth.currentUser;
-    
+
     // Always save to local storage for backup
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('progress_$examId', await _encode(progress));
-    
+
     // If authenticated, also save to cloud
     if (user != null && !user.isAnonymous) {
       try {
@@ -124,7 +127,7 @@ class ProgressProvider extends ChangeNotifier {
         // Continue with local save only
       }
     }
-    
+
     notifyListeners();
   }
 
@@ -138,6 +141,7 @@ class ProgressProvider extends ChangeNotifier {
     List<String>? mistakeQuestions,
     List<String>? correctlyAnsweredQuestions,
     Map<String, int>? masteryAttempts,
+    Map<String, int>? correctAnswerCounts,
   }) {
     if (masteredQuestions != null) {
       progress['masteredQuestions'] = masteredQuestions;
@@ -154,6 +158,9 @@ class ProgressProvider extends ChangeNotifier {
     }
     if (masteryAttempts != null) {
       progress['masteryAttempts'] = masteryAttempts;
+    }
+    if (correctAnswerCounts != null) {
+      progress['correctAnswerCounts'] = correctAnswerCounts;
     }
     notifyListeners();
   }

@@ -2,7 +2,6 @@
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import '../data/exam_data.dart';
 import '../data/imported_exam_storage.dart';
 import '../models/imported_exam.dart';
 import '../models/exam_question.dart';
@@ -12,6 +11,8 @@ import '../providers/progress_provider.dart';
 import '../services/user_exam_service.dart';
 import '../services/admin_auth_service.dart';
 import '../services/expiry_cleanup_service.dart';
+import '../services/optimized_library_service.dart';
+import '../utils/logger.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -38,6 +39,7 @@ class _LibraryScreenState extends State<LibraryScreen>
   List<Map<String, dynamic>> userExams = [];
   List<Map<String, dynamic>> unlockedExams = [];
   List<Map<String, dynamic>> userImportedExams = [];
+  bool _isSyncing = false; // Add sync state variable
 
   @override
   void initState() {
@@ -73,9 +75,7 @@ class _LibraryScreenState extends State<LibraryScreen>
     final uri = Uri.base;
     final refreshParam = uri.queryParameters['refresh'];
     if (refreshParam == 'true') {
-      print('Debug: Force refreshing library from voucher redemption');
-      // Remove the refresh parameter from URL
-      final newUri = uri.replace(queryParameters: {});
+      Logger.debug('Force refreshing library from voucher redemption');
       // Force refresh the library
       _loadExams();
     }
@@ -109,11 +109,63 @@ class _LibraryScreenState extends State<LibraryScreen>
 
   // Force refresh library (called from external sources)
   void forceRefreshLibrary() {
-    print('Debug: Force refreshing library');
+    Logger.debug('Force refreshing library');
     setState(() {
       loading = true;
     });
     _loadExams();
+  }
+
+  // Sync user data with cloud
+  Future<void> _syncUserData() async {
+    if (_isSyncing) return; // Prevent multiple simultaneous syncs
+
+    setState(() {
+      _isSyncing = true;
+    });
+
+    try {
+      Logger.debug('Starting user data sync...');
+
+      // Show sync started message
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('🔄 Syncing data with cloud...'),
+          backgroundColor: Colors.blue,
+          duration: Duration(seconds: 2),
+        ),
+      );
+
+      // Force refresh library to trigger cloud sync
+      await _loadExams();
+
+      // Clean up expired exams
+      await UserExamService.cleanupExpiredExams();
+
+      // Show sync completed message
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Sync completed successfully!'),
+          backgroundColor: Colors.green,
+          duration: Duration(seconds: 2),
+        ),
+      );
+
+      Logger.debug('User data sync completed');
+    } catch (e) {
+      Logger.error('Error during sync: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Sync failed: ${e.toString()}'),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 3),
+        ),
+      );
+    } finally {
+      setState(() {
+        _isSyncing = false;
+      });
+    }
   }
 
   Future<void> _loadAllProgress() async {
@@ -147,139 +199,42 @@ class _LibraryScreenState extends State<LibraryScreen>
     });
 
     try {
-      // Load built-in exam
-      List<ExamQuestion> aifc01 = [];
-      try {
-        aifc01 = (await ExamData.loadFromCsv(
-          'aifc01.csv',
-        )).cast<ExamQuestion>();
-        if (aifc01.isEmpty) {
-          throw Exception('No questions found in aifc01.csv');
-        }
-      } catch (e) {
-        setState(() {
-          loadError = 'Failed to load built-in AWS AI exam: ${e.toString()}';
-          loading = false;
-        });
-        return;
-      }
+      // Use optimized library service
+      final libraryData = await OptimizedLibraryService.loadLibraryData();
 
-      // Load user exams from UserExamService
-      final allUserExams = await UserExamService.getUserExams();
-      print('Debug: Total user exams loaded: ${allUserExams.length}');
+      final allExams = libraryData['exams'] as List<ExamEntry>;
+      final userExamsData =
+          libraryData['userExams'] as List<Map<String, dynamic>>;
+      final adminExamsData =
+          libraryData['adminExams'] as List<Map<String, dynamic>>;
+      final loadTime = libraryData['loadTime'] as int;
 
-      unlockedExams = allUserExams
-          .where((exam) => exam['type'] == 'unlocked')
-          .toList();
-      userImportedExams = allUserExams
-          .where((exam) => exam['type'] == 'user_imported')
-          .toList();
+      Logger.debug('📚 Library loaded in ${loadTime}ms');
 
-      print('Debug: Unlocked exams: ${unlockedExams.length}');
-      print('Debug: User imported exams: ${userImportedExams.length}');
-
-      // Load imported exams (admin-imported)
-      final imported = await ImportedExamStorage.loadAll();
+      // Update exam provider
       final examProvider = Provider.of<ExamProvider>(context, listen: false);
-
-      // Load questions for imported exams
-      final importedEntries = <ExamEntry>[];
-      for (final imp in imported) {
-        try {
-          final questions = await ExamData.loadFromCsv(imp.filename);
-          importedEntries.add(
-            ExamEntry(
-              id: imp.id,
-              title: imp.title,
-              questions: questions.cast<ExamQuestion>(),
-            ),
-          );
-        } catch (_) {}
-      }
-
-      // Set exams from built-in, imported, and user exams
-      final allExams = [
-        ExamEntry(
-          id: 'aifc01',
-          title: 'AWS AI Foundations Certification (aifc01)',
-          questions: aifc01,
-        ),
-        ...importedEntries,
-      ];
-
-      // Add user exams to the provider
-      print('Debug: Total user exams loaded: ${allUserExams.length}');
-      for (final userExam in allUserExams) {
-        print(
-          'Debug: Processing user exam: ${userExam['id']} - ${userExam['title']} - Type: ${userExam['type']}',
-        );
-        try {
-          final questionsJson = userExam['questions'] as List<dynamic>? ?? [];
-          print(
-            'Debug: Loading questions for exam ${userExam['id']}, count: ${questionsJson.length}',
-          );
-
-          // Debug: Print first question structure
-          if (questionsJson.isNotEmpty) {
-            print('Debug: First question structure: ${questionsJson.first}');
-          }
-
-          final questions = questionsJson.map((json) {
-            try {
-              print('Debug: Converting question: $json');
-              final question = ExamQuestion.fromMap(
-                Map<String, dynamic>.from(json),
-              );
-              print(
-                'Debug: Successfully converted question with ID: ${question.id}',
-              );
-              return question;
-            } catch (e) {
-              print('Error parsing question: $e');
-              print('Question data: $json');
-              print('Question data type: ${json.runtimeType}');
-              print(
-                'Question data keys: ${(json as Map<String, dynamic>).keys.toList()}',
-              );
-              rethrow;
-            }
-          }).toList();
-
-          print('Debug: Successfully converted ${questions.length} questions');
-
-          // Handle missing title field for imported exams
-          String title =
-              userExam['title'] as String? ??
-              '${userExam['category'] ?? 'Unknown'} - ${userExam['examCode'] ?? 'Unknown'}';
-
-          // Handle missing id field
-          String examId =
-              userExam['id'] as String? ??
-              'unknown_${DateTime.now().millisecondsSinceEpoch}';
-
-          print(
-            'Debug: Creating ExamEntry - ID: $examId, Title: $title, Questions: ${questions.length}',
-          );
-
-          allExams.add(
-            ExamEntry(id: examId, title: title, questions: questions),
-          );
-
-          print('Debug: Successfully added exam to allExams list');
-        } catch (e) {
-          print('Error loading user exam ${userExam['id']}: $e');
-          print('User exam data: ${userExam.keys.toList()}');
-        }
-      }
-
       examProvider.setExams(allExams);
-
-      // Save to persistent storage
       await examProvider.saveAllExams();
 
+      // Update state
       setState(() {
-        importedExams = imported;
-        userExams = allUserExams;
+        importedExams = adminExamsData
+            .map(
+              (exam) => ImportedExam(
+                id: exam['id'] as String,
+                title: exam['title'] as String,
+                filename: 'cloud_${exam['id']}',
+                importedAt: DateTime.now(),
+              ),
+            )
+            .toList();
+        userExams = userExamsData;
+        unlockedExams = userExamsData
+            .where((exam) => exam['type'] == 'unlocked')
+            .toList();
+        userImportedExams = userExamsData
+            .where((exam) => exam['type'] == 'user_imported')
+            .toList();
         loading = false;
         loadError = null;
       });
@@ -301,18 +256,18 @@ class _LibraryScreenState extends State<LibraryScreen>
   @override
   Widget build(BuildContext context) {
     final examProvider = Provider.of<ExamProvider>(context);
-    print(
-      'Debug: Library build - Total exams in provider: ${examProvider.exams.length}',
+    Logger.debug(
+      'Library build - Total exams in provider: ${examProvider.exams.length}',
     );
-    print('Debug: Library build - Search term: "$search"');
+    Logger.debug('Library build - Search term: "$search"');
 
     final filtered = examProvider.exams
         .where((e) => e.title.toLowerCase().contains(search.toLowerCase()))
         .toList();
 
-    print('Debug: Library build - Filtered exams count: ${filtered.length}');
+    Logger.debug('Library build - Filtered exams count: ${filtered.length}');
     for (final exam in examProvider.exams) {
-      print('Debug: Library build - Exam: ${exam.title}');
+      Logger.debug('Library build - Exam: ${exam.title}');
     }
 
     Provider.of<ProgressProvider>(context);
@@ -328,16 +283,53 @@ class _LibraryScreenState extends State<LibraryScreen>
         elevation: 0,
         backgroundColor: Colors.transparent,
         actions: [
-          // Refresh Button
-          IconButton(
-            icon: Icon(Icons.refresh, color: theme.colorScheme.onSurface),
-            onPressed: () {
-              setState(() {
-                loading = true;
-              });
-              _loadExams();
+          // Refresh Button with cache indicator
+          FutureBuilder<Map<String, dynamic>>(
+            future: Future.value(OptimizedLibraryService.getCacheStatus()),
+            builder: (context, snapshot) {
+              final cacheStatus =
+                  snapshot.data ?? {'isValid': false, 'ageMinutes': 0};
+              final isCacheValid = cacheStatus['isValid'] as bool;
+              final cacheAge = cacheStatus['ageMinutes'] as int;
+
+              return IconButton(
+                icon: Stack(
+                  children: [
+                    Icon(Icons.refresh, color: theme.colorScheme.onSurface),
+                    if (isCacheValid)
+                      Positioned(
+                        right: 0,
+                        top: 0,
+                        child: Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: Colors.green,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                onPressed: () {
+                  setState(() {
+                    loading = true;
+                  });
+                  _loadExams();
+                },
+                tooltip: isCacheValid
+                    ? 'Refresh Library (Cache: ${cacheAge}min ago)'
+                    : 'Refresh Library',
+              );
             },
-            tooltip: 'Refresh Library',
+          ),
+          // Voucher Entry Button
+          IconButton(
+            icon: Icon(Icons.card_giftcard, color: theme.colorScheme.primary),
+            onPressed: () {
+              context.go('/voucher-entry');
+            },
+            tooltip: 'Enter Voucher',
           ),
           // Admin Portal Switch Button (only visible for authenticated admins)
           FutureBuilder<bool>(
@@ -358,9 +350,22 @@ class _LibraryScreenState extends State<LibraryScreen>
               return SizedBox.shrink();
             },
           ),
+          // Sync Button (replaces burger menu)
           IconButton(
-            icon: Icon(Icons.menu, color: theme.colorScheme.onSurface),
-            onPressed: () {},
+            icon: _isSyncing
+                ? SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        theme.colorScheme.primary,
+                      ),
+                    ),
+                  )
+                : Icon(Icons.sync, color: theme.colorScheme.primary),
+            onPressed: _isSyncing ? null : _syncUserData,
+            tooltip: _isSyncing ? 'Syncing...' : 'Sync Data',
           ),
         ],
       ),
@@ -587,15 +592,14 @@ class _LibraryScreenState extends State<LibraryScreen>
     final percent = total > 0 ? mastered / total : 0.0;
 
     // Determine exam type and styling
-    final isBuiltIn = exam.id == 'aifc01';
     final isUnlocked = unlockedExams.any((e) => e['id'] == exam.id);
     final isUserImported = userImportedExams.any((e) => e['id'] == exam.id);
     final isAdminImported = importedExams.any((e) => e.id == exam.id);
 
     // Get exam type for badge
-    String examType = 'Built-in';
-    Color badgeColor = theme.colorScheme.primary;
-    IconData examIcon = Icons.star;
+    String examType = 'Unknown';
+    Color badgeColor = Colors.grey;
+    IconData examIcon = Icons.help;
 
     if (isUnlocked) {
       examType = 'Unlocked';
@@ -606,13 +610,9 @@ class _LibraryScreenState extends State<LibraryScreen>
       badgeColor = Colors.orange;
       examIcon = Icons.upload;
     } else if (isAdminImported) {
-      examType = 'Admin Imported';
-      badgeColor = theme.colorScheme.secondary;
-      examIcon = Icons.admin_panel_settings;
-    } else if (isBuiltIn) {
-      examType = 'Built-in';
-      badgeColor = theme.colorScheme.primary;
-      examIcon = Icons.star;
+      examType = 'Admin Imported (Locked)';
+      badgeColor = Colors.red;
+      examIcon = Icons.lock;
     }
 
     return Container(
@@ -622,7 +622,14 @@ class _LibraryScreenState extends State<LibraryScreen>
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: InkWell(
           borderRadius: BorderRadius.circular(16),
-          onTap: () => context.go('/exam/${exam.id}'),
+          onTap: () {
+            // If admin imported and not unlocked, show voucher entry
+            if (isAdminImported && !isUnlocked) {
+              _showVoucherEntryDialog(exam);
+            } else {
+              context.go('/exam/${exam.id}');
+            }
+          },
           child: Padding(
             padding: const EdgeInsets.all(20),
             child: Column(
@@ -689,7 +696,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                         }
                       },
                       itemBuilder: (context) => [
-                        if (!isBuiltIn && (isUserImported || isAdminImported))
+                        if (!isUnlocked && (isUserImported || isAdminImported))
                           PopupMenuItem(
                             value: 'rename',
                             child: Row(
@@ -704,7 +711,7 @@ class _LibraryScreenState extends State<LibraryScreen>
                               ],
                             ),
                           ),
-                        if (!isBuiltIn && (isUserImported || isAdminImported))
+                        if (!isUnlocked && (isUserImported || isAdminImported))
                           PopupMenuItem(
                             value: 'delete',
                             child: Row(
@@ -738,9 +745,24 @@ class _LibraryScreenState extends State<LibraryScreen>
                   children: [
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed: () => context.go('/exam/${exam.id}'),
-                        icon: const Icon(Icons.play_arrow),
-                        label: const Text('Start Studying'),
+                        onPressed: () {
+                          // If admin imported and not unlocked, show voucher entry
+                          if (isAdminImported && !isUnlocked) {
+                            _showVoucherEntryDialog(exam);
+                          } else {
+                            context.go('/exam/${exam.id}');
+                          }
+                        },
+                        icon: Icon(
+                          isAdminImported && !isUnlocked
+                              ? Icons.lock
+                              : Icons.play_arrow,
+                        ),
+                        label: Text(
+                          isAdminImported && !isUnlocked
+                              ? 'Unlock with Voucher'
+                              : 'Start Studying',
+                        ),
                         style: OutlinedButton.styleFrom(
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           shape: RoundedRectangleBorder(
@@ -969,6 +991,11 @@ class _LibraryScreenState extends State<LibraryScreen>
         ),
       ],
     );
+  }
+
+  void _showVoucherEntryDialog(dynamic exam) {
+    // Navigate to the dedicated voucher entry screen
+    context.go('/voucher-entry');
   }
 
   Future<void> _showDeleteDialog(dynamic exam) async {

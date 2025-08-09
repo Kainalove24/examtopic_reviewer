@@ -9,12 +9,13 @@ import '../models/exam_question.dart';
 import '../widgets/ai_explanation_card.dart';
 import '../widgets/enhanced_image_viewer.dart';
 import '../services/image_service.dart';
+import '../utils/logger.dart';
 import 'dart:math';
 import 'dart:convert';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
-import 'package:flutter/foundation.dart' show kIsWeb;
+import '../services/optimized_image_service.dart';
 
 class MistakeReviewScreen extends StatefulWidget {
   final String examId;
@@ -59,10 +60,10 @@ class _MistakeReviewScreenState extends State<MistakeReviewScreen> {
     final List<String> mistakeIds =
         (progress['mistakeQuestions'] as List?)?.cast<String>() ?? [];
 
-    print('Debug: Loading mistake review for exam: ${widget.examId}');
-    print('Debug: Progress data: $progress');
-    print('Debug: Mistake IDs found: $mistakeIds');
-    print('Debug: Total questions available: ${widget.allQuestions.length}');
+    Logger.debug('Loading mistake review for exam: ${widget.examId}');
+    Logger.debug('Progress data: $progress');
+    Logger.debug('Mistake IDs found: $mistakeIds');
+    Logger.debug('Total questions available: ${widget.allQuestions.length}');
 
     // Convert ExamQuestion to Map and filter by mistake IDs
     final mistakes = widget.allQuestions
@@ -70,7 +71,7 @@ class _MistakeReviewScreenState extends State<MistakeReviewScreen> {
         .map((q) => q.toMap())
         .toList();
 
-    print('Debug: Questions matching mistake IDs: ${mistakes.length}');
+    Logger.debug('Questions matching mistake IDs: ${mistakes.length}');
 
     // Shuffle the mistakes
     final random = Random();
@@ -80,14 +81,14 @@ class _MistakeReviewScreenState extends State<MistakeReviewScreen> {
       mistakeQueue = mistakes;
     });
 
-    print('Debug: Final mistake queue length: ${mistakeQueue.length}');
+    Logger.debug('Final mistake queue length: ${mistakeQueue.length}');
   }
 
   String _getQuestionId(Map<String, dynamic> question) {
     // Create a unique ID for the question based on its content using hash codes
     final textHash = question['text']?.hashCode ?? 0;
     final optionsHash = question['options']?.hashCode ?? 0;
-    return '${textHash}_${optionsHash}';
+    return '${textHash}_$optionsHash';
   }
 
   int _getOriginalQuestionNumber(Map<String, dynamic> question) {
@@ -131,7 +132,7 @@ class _MistakeReviewScreenState extends State<MistakeReviewScreen> {
   }
 
   Widget _buildImageWidget(String imageData) {
-    print('Building image widget for: $imageData');
+    Logger.debug('Building image widget for: $imageData');
 
     // Check if it's a base64 image
     if (imageData.startsWith('data:image/')) {
@@ -152,27 +153,27 @@ class _MistakeReviewScreenState extends State<MistakeReviewScreen> {
               height: 120,
               fit: BoxFit.contain,
               errorBuilder: (context, error, stackTrace) {
-                print('Error loading base64 image: $error');
+                Logger.error('Error loading base64 image: $error');
                 return _buildErrorImage();
               },
             ),
           ),
         );
       } catch (e) {
-        print('Exception loading base64 image: $e');
+        Logger.error('Exception loading base64 image: $e');
         return _buildErrorImage();
       }
     }
 
     // Check if it's a network URL
     if (imageData.startsWith('http://') || imageData.startsWith('https://')) {
-      print('Loading network image: $imageData');
+      Logger.debug('Loading network image: $imageData');
       return _buildNetworkImage(imageData);
     }
 
     // Check if it's a local file path
     if (imageData.startsWith('images/')) {
-      print('Loading local image: $imageData');
+      Logger.debug('Loading local image: $imageData');
       return _buildLocalImage(imageData);
     }
 
@@ -206,34 +207,50 @@ class _MistakeReviewScreenState extends State<MistakeReviewScreen> {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.network(
-          imageData,
-          height: 120,
-          fit: BoxFit.contain,
-          // Use ImageService for better mobile web compatibility
-          headers: ImageService.getWebHeaders(),
-          loadingBuilder: (context, child, loadingProgress) {
-            if (loadingProgress == null) return child;
-            return Container(
-              height: 120,
-              color: Colors.grey.shade100,
-              child: Center(
-                child: CircularProgressIndicator(
-                  value: loadingProgress.expectedTotalBytes != null
-                      ? loadingProgress.cumulativeBytesLoaded /
-                            loadingProgress.expectedTotalBytes!
-                      : null,
-                ),
-              ),
-            );
-          },
-          errorBuilder: (context, error, stackTrace) {
-            print('Error loading network image: $error');
-            // For web, try alternative loading methods
-            if (kIsWeb) {
-              return _buildWebFallbackImage(imageData);
+        child: FutureBuilder<String?>(
+          future: OptimizedImageService.loadImage(imageData),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return Container(
+                height: 120,
+                color: Colors.grey.shade100,
+                child: const Center(child: CircularProgressIndicator()),
+              );
             }
-            return _buildErrorImage();
+
+            if (snapshot.hasError) {
+              Logger.error(
+                'Error loading image through OptimizedImageService: ${snapshot.error}',
+              );
+              return _buildErrorImage();
+            }
+
+            final processedUrl = snapshot.data ?? imageData;
+
+            return Image.network(
+              processedUrl,
+              height: 120,
+              fit: BoxFit.contain,
+              loadingBuilder: (context, child, loadingProgress) {
+                if (loadingProgress == null) return child;
+                return Container(
+                  height: 120,
+                  color: Colors.grey.shade100,
+                  child: Center(
+                    child: CircularProgressIndicator(
+                      value: loadingProgress.expectedTotalBytes != null
+                          ? loadingProgress.cumulativeBytesLoaded /
+                                loadingProgress.expectedTotalBytes!
+                          : null,
+                    ),
+                  ),
+                );
+              },
+              errorBuilder: (context, error, stackTrace) {
+                Logger.error('Error loading network image: $error');
+                return _buildErrorImage();
+              },
+            );
           },
         ),
       ),
@@ -323,17 +340,18 @@ class _MistakeReviewScreenState extends State<MistakeReviewScreen> {
               height: 120,
               fit: BoxFit.contain,
               errorBuilder: (context, error, stackTrace) {
-                throw Exception('Failed to load base64 image');
+                Logger.error('Error loading base64 image: $error');
+                return _buildErrorImage();
               },
             ),
           ),
         );
       }
     } catch (e) {
-      print('Failed to convert image to base64: $e');
+      Logger.error('Error converting image to base64: $e');
     }
 
-    // Approach 2: Try with different headers
+    // Approach 2: Try with custom headers
     try {
       return Container(
         decoration: BoxDecoration(
@@ -351,36 +369,42 @@ class _MistakeReviewScreenState extends State<MistakeReviewScreen> {
                   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             },
             errorBuilder: (context, error, stackTrace) {
-              throw Exception('Failed with custom headers');
+              Logger.error('Error loading with custom headers: $error');
+              return _buildErrorImage();
             },
           ),
         ),
       );
     } catch (e) {
-      // Approach 3: Try without any headers
-      try {
-        return Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey.shade300),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.network(
-              imageData,
-              height: 120,
-              fit: BoxFit.contain,
-              errorBuilder: (context, error, stackTrace) {
-                throw Exception('Failed without headers');
-              },
-            ),
-          ),
-        );
-      } catch (e) {
-        // Approach 4: Show a placeholder
-        return _buildMobileWebPlaceholder();
-      }
+      Logger.error('Exception loading with custom headers: $e');
     }
+
+    // Approach 3: Try without any headers
+    try {
+      return Container(
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.grey.shade300),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.network(
+            imageData,
+            height: 120,
+            fit: BoxFit.contain,
+            errorBuilder: (context, error, stackTrace) {
+              Logger.error('Error loading without headers: $error');
+              return _buildErrorImage();
+            },
+          ),
+        ),
+      );
+    } catch (e) {
+      Logger.error('Exception loading without headers: $e');
+    }
+
+    // Approach 4: Show a placeholder
+    return _buildMobileWebPlaceholder();
   }
 
   Widget _buildMobileWebPlaceholder() {
@@ -1408,61 +1432,66 @@ class _MistakeReviewScreenState extends State<MistakeReviewScreen> {
                       });
                     },
               child: Container(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 12,
-                  horizontal: 16,
-                ),
-                decoration: BoxDecoration(
-                  color: indices.isNotEmpty
-                      ? theme.colorScheme.primaryContainer
-                      : theme.colorScheme.surfaceContainerHighest.withOpacity(
-                          0.3,
-                        ),
-                  border: Border.all(
-                    color: indices.isNotEmpty
-                        ? theme.colorScheme.primary
-                        : theme.colorScheme.outline,
-                    width: indices.isNotEmpty ? 2 : 1,
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 12,
+                    horizontal: 16,
                   ),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      '${i + 1}. ${options[i]}',
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        fontWeight: indices.isNotEmpty
-                            ? FontWeight.w600
-                            : FontWeight.w400,
-                        color: indices.isNotEmpty
-                            ? theme.colorScheme.onPrimaryContainer
-                            : theme.colorScheme.onSurface,
-                      ),
+                  decoration: BoxDecoration(
+                    color: indices.isNotEmpty
+                        ? theme.colorScheme.primaryContainer
+                        : theme.colorScheme.surfaceContainerHighest.withOpacity(
+                            0.3,
+                          ),
+                    border: Border.all(
+                      color: indices.isNotEmpty
+                          ? theme.colorScheme.primary
+                          : theme.colorScheme.outline,
+                      width: indices.isNotEmpty ? 2 : 1,
                     ),
-                    if (indices.isNotEmpty) ...[
-                      const SizedBox(width: 8),
-                      ...indices.map(
-                        (orderIdx) => Container(
-                          margin: const EdgeInsets.only(left: 2),
-                          padding: const EdgeInsets.all(4),
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.primary,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Text(
-                            (orderIdx + 1).toString(),
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onPrimary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${i + 1}. ${options[i]}',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          fontWeight: indices.isNotEmpty
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                          color: indices.isNotEmpty
+                              ? theme.colorScheme.onPrimaryContainer
+                              : theme.colorScheme.onSurface,
                         ),
+                        textAlign: TextAlign.start,
                       ),
+                      if (indices.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 4,
+                          children: indices
+                              .map(
+                                (orderIdx) => Container(
+                                  padding: const EdgeInsets.all(4),
+                                  decoration: BoxDecoration(
+                                    color: theme.colorScheme.primary,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Text(
+                                    (orderIdx + 1).toString(),
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      color: theme.colorScheme.onPrimary,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
-              ),
             );
           }),
         ),

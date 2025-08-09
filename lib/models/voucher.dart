@@ -1,3 +1,4 @@
+
 class Voucher {
   final String id;
   final String code;
@@ -24,27 +25,9 @@ class Voucher {
     this.isUsed = false,
     this.usedBy,
     this.usedDate,
-  }) {
-    print('Debug: Voucher constructor - examData present: ${examData != null}');
-    print(
-      'Debug: Voucher constructor - examData keys: ${examData?.keys.toList()}',
-    );
-  }
+  });
 
   factory Voucher.fromJson(Map<String, dynamic> json) {
-    print('Debug: Voucher.fromJson - Input JSON keys: ${json.keys.toList()}');
-    print(
-      'Debug: Voucher.fromJson - examData present: ${json['examData'] != null}',
-    );
-    print(
-      'Debug: Voucher.fromJson - examData type: ${json['examData']?.runtimeType}',
-    );
-    if (json['examData'] != null) {
-      print(
-        'Debug: Voucher.fromJson - examData keys: ${(json['examData'] as Map<String, dynamic>).keys.toList()}',
-      );
-    }
-
     return Voucher(
       id: json['id'] ?? '',
       code: json['code'] ?? '',

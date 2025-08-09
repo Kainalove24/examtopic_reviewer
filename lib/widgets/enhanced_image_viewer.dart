@@ -5,6 +5,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:flutter/foundation.dart';
 import '../services/image_service.dart';
+import '../config/server_config.dart';
+import '../services/optimized_image_service.dart';
 
 class EnhancedImageViewer extends StatefulWidget {
   final String imageData; // Can be base64, URL, or asset path
@@ -20,13 +22,53 @@ class _EnhancedImageViewerState extends State<EnhancedImageViewer> {
   late TransformationController _transformationController;
   TapDownDetails? _doubleTapDetails;
   double _scale = 1.0;
-  double _minScale = 1.0;
-  double _maxScale = 5.0;
+  final double _minScale = 1.0;
+  final double _maxScale = 5.0;
+  String? _processedImageUrl;
+  bool _isLoading = true;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
     _transformationController = TransformationController();
+    _loadImage();
+  }
+
+  Future<void> _loadImage() async {
+    if (widget.imageData.startsWith('http://') ||
+        widget.imageData.startsWith('https://')) {
+      try {
+        setState(() {
+          _isLoading = true;
+          _error = null;
+        });
+
+        final processedUrl = await OptimizedImageService.loadImage(
+          widget.imageData,
+        );
+
+        if (mounted) {
+          setState(() {
+            _processedImageUrl = processedUrl;
+            _isLoading = false;
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _error = e.toString();
+            _isLoading = false;
+          });
+        }
+      }
+    } else {
+      // For local images, no processing needed
+      setState(() {
+        _processedImageUrl = widget.imageData;
+        _isLoading = false;
+      });
+    }
   }
 
   @override
@@ -61,6 +103,57 @@ class _EnhancedImageViewerState extends State<EnhancedImageViewer> {
     }
   }
 
+  Widget _buildImageContent() {
+    if (_isLoading) {
+      return Container(
+        color: Colors.black.withValues(alpha: 0.7),
+        child: const Center(
+          child: CircularProgressIndicator(
+            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+          ),
+        ),
+      );
+    }
+
+    if (_error != null) {
+      return Container(
+        color: Colors.black.withValues(alpha: 0.7),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error, color: Colors.white, size: 64),
+              const SizedBox(height: 16),
+              Text(
+                'Failed to load image',
+                style: const TextStyle(color: Colors.white, fontSize: 18),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _error!,
+                style: const TextStyle(color: Colors.white70, fontSize: 14),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(onPressed: _loadImage, child: const Text('Retry')),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return GestureDetector(
+      onDoubleTapDown: _handleDoubleTapDown,
+      onDoubleTap: _handleDoubleTap,
+      child: InteractiveViewer(
+        transformationController: _transformationController,
+        minScale: _minScale,
+        maxScale: _maxScale,
+        child: Center(child: _buildImageWidget()),
+      ),
+    );
+  }
+
   Widget _buildImageWidget() {
     // Check if it's a base64 image
     if (widget.imageData.startsWith('data:image/')) {
@@ -80,41 +173,46 @@ class _EnhancedImageViewerState extends State<EnhancedImageViewer> {
       }
     }
 
+    // Use processed image URL if available, otherwise use original
+    final imageUrl = _processedImageUrl ?? widget.imageData;
+
     // Check if it's a network URL
-    if (widget.imageData.startsWith('http://') ||
-        widget.imageData.startsWith('https://')) {
-      return _buildNetworkImage();
+    if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+      return _buildNetworkImage(imageUrl);
     }
 
     // Check if it's a local file path
-    if (widget.imageData.startsWith('images/')) {
+    if (imageUrl.startsWith('images/')) {
       return _buildLocalImage();
     }
 
     // Assume it's an asset path
     return Image.asset(
-      widget.imageData,
+      imageUrl,
       fit: BoxFit.contain,
       errorBuilder: (context, error, stackTrace) =>
           _buildErrorWidget('Asset image not found'),
     );
   }
 
-  Widget _buildNetworkImage() {
+  Widget _buildNetworkImage(String imageUrl) {
     return Image.network(
-      widget.imageData,
+      imageUrl,
       fit: BoxFit.contain,
       // Use ImageService for better mobile web compatibility
       headers: ImageService.getWebHeaders(),
       loadingBuilder: (context, child, loadingProgress) {
         if (loadingProgress == null) return child;
-        return Center(
-          child: CircularProgressIndicator(
-            value: loadingProgress.expectedTotalBytes != null
-                ? loadingProgress.cumulativeBytesLoaded /
-                      loadingProgress.expectedTotalBytes!
-                : null,
-            valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+        return Container(
+          color: Colors.black.withValues(alpha: 0.3),
+          child: Center(
+            child: CircularProgressIndicator(
+              value: loadingProgress.expectedTotalBytes != null
+                  ? loadingProgress.cumulativeBytesLoaded /
+                        loadingProgress.expectedTotalBytes!
+                  : null,
+              valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+            ),
           ),
         );
       },
@@ -129,6 +227,11 @@ class _EnhancedImageViewerState extends State<EnhancedImageViewer> {
   }
 
   Widget _buildLocalImage() {
+    // For web, try to load as asset first, then fallback to file
+    if (kIsWeb) {
+      return _buildWebLocalImage();
+    }
+
     return FutureBuilder<String?>(
       future: _getLocalImagePath(widget.imageData),
       builder: (context, snapshot) {
@@ -140,16 +243,122 @@ class _EnhancedImageViewerState extends State<EnhancedImageViewer> {
               return _buildErrorWidget('Local image failed to load');
             },
           );
-        } else if (snapshot.hasError) {
-          return _buildErrorWidget('Error loading local image');
         } else {
-          return const Center(
-            child: CircularProgressIndicator(
-              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+          return Container(
+            color: Colors.black.withValues(alpha: 0.3),
+            child: const Center(
+              child: CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+              ),
             ),
           );
         }
       },
+    );
+  }
+
+  Widget _buildWebLocalImage() {
+    // For web, try different approaches to load local images
+    return FutureBuilder<Widget>(
+      future: _tryWebLocalImageLoading(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return Container(
+            color: Colors.black.withValues(alpha: 0.3),
+            child: const Center(
+              child: CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+              ),
+            ),
+          );
+        }
+
+        if (snapshot.hasData) {
+          return snapshot.data!;
+        }
+
+        return _buildErrorWidget('Local image not available on web');
+      },
+    );
+  }
+
+  Future<Widget> _tryWebLocalImageLoading() async {
+    // Try different approaches for web local images
+    try {
+      // Approach 1: Try as asset
+      final assetPath = 'assets/${widget.imageData}';
+      return Image.asset(
+        assetPath,
+        fit: BoxFit.contain,
+        errorBuilder: (context, error, stackTrace) {
+          throw Exception('Asset not found');
+        },
+      );
+    } catch (e) {
+      print('Failed to load as asset: $e');
+    }
+
+    // Approach 2: Try with different asset paths
+    try {
+      final assetPath = widget.imageData;
+      return Image.asset(
+        assetPath,
+        fit: BoxFit.contain,
+        errorBuilder: (context, error, stackTrace) {
+          throw Exception('Asset not found');
+        },
+      );
+    } catch (e) {
+      print('Failed to load as direct asset: $e');
+    }
+
+    // Approach 3: Try to load from the Render server if it's a known image
+    try {
+      final imageName = path.basename(widget.imageData);
+      final serverUrl =
+          '${ServerConfig.imageProcessingServerUrl}/api/images/$imageName';
+
+      return Image.network(
+        serverUrl,
+        fit: BoxFit.contain,
+        headers: ImageService.getWebHeaders(),
+        errorBuilder: (context, error, stackTrace) {
+          throw Exception('Server image not found');
+        },
+      );
+    } catch (e) {
+      print('Failed to load from server: $e');
+    }
+
+    // Approach 4: Show a placeholder with download option
+    return _buildWebLocalImagePlaceholder();
+  }
+
+  Widget _buildWebLocalImagePlaceholder() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.grey[800],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.grey[600]!),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.image_not_supported, size: 48, color: Colors.grey[400]),
+          const SizedBox(height: 8),
+          Text(
+            'Local image not available on web',
+            style: TextStyle(color: Colors.grey[400]),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Image: ${path.basename(widget.imageData)}',
+            style: TextStyle(color: Colors.grey[500], fontSize: 12),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
     );
   }
 
@@ -334,7 +543,7 @@ class _EnhancedImageViewerState extends State<EnhancedImageViewer> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Colors.transparent,
       appBar: AppBar(
         backgroundColor: Colors.black.withValues(alpha: 0.8),
         foregroundColor: Colors.white,
@@ -386,16 +595,7 @@ class _EnhancedImageViewerState extends State<EnhancedImageViewer> {
           ),
         ],
       ),
-      body: GestureDetector(
-        onDoubleTapDown: _handleDoubleTapDown,
-        onDoubleTap: _handleDoubleTap,
-        child: InteractiveViewer(
-          transformationController: _transformationController,
-          minScale: _minScale,
-          maxScale: _maxScale,
-          child: Center(child: _buildImageWidget()),
-        ),
-      ),
+      body: _buildImageContent(),
     );
   }
 }

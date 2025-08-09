@@ -8,11 +8,11 @@ import '../widgets/ai_explanation_card.dart';
 import '../widgets/enhanced_image_viewer.dart';
 import '../services/sound_service.dart';
 import '../services/image_service.dart';
+import '../services/optimized_image_service.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
-import 'package:flutter/foundation.dart' show kIsWeb;
 
 class QuizModeScreen extends StatefulWidget {
   final String examTitle;
@@ -160,34 +160,50 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.network(
-          imageData,
-          height: 120,
-          fit: BoxFit.contain,
-          // Use ImageService for better mobile web compatibility
-          headers: ImageService.getWebHeaders(),
-          loadingBuilder: (context, child, loadingProgress) {
-            if (loadingProgress == null) return child;
-            return Container(
-              height: 120,
-              color: Colors.grey.shade100,
-              child: Center(
-                child: CircularProgressIndicator(
-                  value: loadingProgress.expectedTotalBytes != null
-                      ? loadingProgress.cumulativeBytesLoaded /
-                            loadingProgress.expectedTotalBytes!
-                      : null,
-                ),
-              ),
-            );
-          },
-          errorBuilder: (context, error, stackTrace) {
-            print('Error loading network image: $error');
-            // For web, try alternative loading methods
-            if (kIsWeb) {
-              return _buildWebFallbackImage(imageData);
+        child: FutureBuilder<String?>(
+          future: OptimizedImageService.loadImage(imageData),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return Container(
+                height: 120,
+                color: Colors.grey.shade100,
+                child: const Center(child: CircularProgressIndicator()),
+              );
             }
-            return _buildErrorImage();
+
+            if (snapshot.hasError) {
+              print(
+                'Error loading image through OptimizedImageService: ${snapshot.error}',
+              );
+              return _buildErrorImage();
+            }
+
+            final processedUrl = snapshot.data ?? imageData;
+
+            return Image.network(
+              processedUrl,
+              height: 120,
+              fit: BoxFit.contain,
+              loadingBuilder: (context, child, loadingProgress) {
+                if (loadingProgress == null) return child;
+                return Container(
+                  height: 120,
+                  color: Colors.grey.shade100,
+                  child: Center(
+                    child: CircularProgressIndicator(
+                      value: loadingProgress.expectedTotalBytes != null
+                          ? loadingProgress.cumulativeBytesLoaded /
+                                loadingProgress.expectedTotalBytes!
+                          : null,
+                    ),
+                  ),
+                );
+              },
+              errorBuilder: (context, error, stackTrace) {
+                print('Error loading network image: $error');
+                return _buildErrorImage();
+              },
+            );
           },
         ),
       ),
@@ -249,11 +265,11 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
             child: const Center(child: CircularProgressIndicator()),
           );
         }
-        
+
         if (snapshot.hasData) {
           return snapshot.data!;
         }
-        
+
         return _buildMobileWebPlaceholder();
       },
     );
@@ -277,17 +293,18 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
               height: 120,
               fit: BoxFit.contain,
               errorBuilder: (context, error, stackTrace) {
-                throw Exception('Failed to load base64 image');
+                print('Error loading base64 image: $error');
+                return _buildErrorImage();
               },
             ),
           ),
         );
       }
     } catch (e) {
-      print('Failed to convert image to base64: $e');
+      print('Error converting image to base64: $e');
     }
 
-    // Approach 2: Try with different headers
+    // Approach 2: Try with custom headers
     try {
       return Container(
         decoration: BoxDecoration(
@@ -301,39 +318,46 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
             height: 120,
             fit: BoxFit.contain,
             headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             },
             errorBuilder: (context, error, stackTrace) {
-              throw Exception('Failed with custom headers');
+              print('Error loading with custom headers: $error');
+              return _buildErrorImage();
             },
           ),
         ),
       );
     } catch (e) {
-      // Approach 3: Try without any headers
-      try {
-        return Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey.shade300),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.network(
-              imageData,
-              height: 120,
-              fit: BoxFit.contain,
-              errorBuilder: (context, error, stackTrace) {
-                throw Exception('Failed without headers');
-              },
-            ),
-          ),
-        );
-      } catch (e) {
-        // Approach 4: Show a placeholder
-        return _buildMobileWebPlaceholder();
-      }
+      print('Exception loading with custom headers: $e');
     }
+
+    // Approach 3: Try without any headers
+    try {
+      return Container(
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.grey.shade300),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.network(
+            imageData,
+            height: 120,
+            fit: BoxFit.contain,
+            errorBuilder: (context, error, stackTrace) {
+              print('Error loading without headers: $error');
+              return _buildErrorImage();
+            },
+          ),
+        ),
+      );
+    } catch (e) {
+      print('Exception loading without headers: $e');
+    }
+
+    // Approach 4: Show a placeholder
+    return _buildMobileWebPlaceholder();
   }
 
   Widget _buildMobileWebPlaceholder() {
@@ -406,7 +430,10 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
           children: [
             Icon(Icons.broken_image, color: Colors.red, size: 24),
             SizedBox(height: 4),
-            Text('Image not found', style: TextStyle(fontSize: 10, color: Colors.red)),
+            Text(
+              'Image not found',
+              style: TextStyle(fontSize: 10, color: Colors.red),
+            ),
           ],
         ),
       ),
@@ -427,6 +454,18 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
     super.initState();
     progressProvider = Provider.of<ProgressProvider>(context, listen: false);
     _initializeQuiz();
+    _preDownloadImagesForOffline(); // NEW: Pre-download for offline access
+  }
+
+  // NEW: Pre-download all images for offline access
+  Future<void> _preDownloadImagesForOffline() async {
+    try {
+      print('🔄 Starting offline image preparation for quiz...');
+      await OptimizedImageService.preDownloadExamImages(widget.questions);
+      print('✅ Offline image preparation complete for quiz');
+    } catch (e) {
+      print('❌ Error preparing offline images for quiz: $e');
+    }
   }
 
   void _initializeQuiz() {
@@ -1741,8 +1780,8 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
                   ),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       '${i + 1}. ${options[i]}',
@@ -1754,25 +1793,30 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
                             ? theme.colorScheme.onPrimaryContainer
                             : theme.colorScheme.onSurface,
                       ),
+                      textAlign: TextAlign.start,
                     ),
                     if (indices.isNotEmpty) ...[
-                      const SizedBox(width: 8),
-                      ...indices.map(
-                        (orderIdx) => Container(
-                          margin: const EdgeInsets.only(left: 2),
-                          padding: const EdgeInsets.all(4),
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.primary,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Text(
-                            (orderIdx + 1).toString(),
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onPrimary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 4,
+                        children: indices
+                            .map(
+                              (orderIdx) => Container(
+                                padding: const EdgeInsets.all(4),
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.primary,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Text(
+                                  (orderIdx + 1).toString(),
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.onPrimary,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            )
+                            .toList(),
                       ),
                     ],
                   ],
@@ -1844,39 +1888,6 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
             ],
           ),
         ),
-        if (submitted) ...[
-          const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: theme.colorScheme.primaryContainer.withOpacity(0.3),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                color: theme.colorScheme.primary.withOpacity(0.2),
-                width: 1,
-              ),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.check_circle_rounded,
-                  color: theme.colorScheme.primary,
-                  size: 16,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _getCorrectAnswerText(q),
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: theme.colorScheme.primary,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
       ],
     );
   }
@@ -1891,31 +1902,15 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
           '',
         );
 
-        final correctIndices = submitted ? _getCorrectIndices(q) : [];
         final isSelected = selectedOptions.contains(i);
-        final isCorrect = correctIndices.contains(i);
 
         Color? checkboxColor;
         Color? textColor;
-        IconData? icon;
-        Color? iconColor;
 
         if (submitted) {
-          if (isSelected && isCorrect) {
-            checkboxColor = Colors.green;
-            textColor = Colors.green;
-            icon = Icons.check_circle_rounded;
-            iconColor = Colors.green;
-          } else if (isSelected && !isCorrect) {
-            checkboxColor = theme.colorScheme.error;
-            textColor = theme.colorScheme.error;
-            icon = Icons.cancel_rounded;
-            iconColor = theme.colorScheme.error;
-          } else if (!isSelected && isCorrect) {
-            checkboxColor = Colors.green;
-            textColor = Colors.green;
-            icon = Icons.check_circle_rounded;
-            iconColor = Colors.green;
+          if (isSelected) {
+            checkboxColor = isCorrect ? Colors.green : theme.colorScheme.error;
+            textColor = isCorrect ? Colors.green : theme.colorScheme.error;
           }
         } else if (isSelected) {
           checkboxColor = theme.colorScheme.primary;
@@ -1954,10 +1949,6 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
                   ),
                 ),
               ),
-              if (icon != null) ...[
-                const SizedBox(width: 8),
-                Icon(icon, color: iconColor, size: 20),
-              ],
             ],
           ),
         );
@@ -1975,31 +1966,15 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
           '',
         );
 
-        final correctIndices = submitted ? _getCorrectIndices(q) : [];
         final isSelected = selectedOption == i;
-        final isCorrect = correctIndices.contains(i);
 
         Color? radioColor;
         Color? textColor;
-        IconData? icon;
-        Color? iconColor;
 
         if (submitted) {
-          if (isSelected && isCorrect) {
-            radioColor = Colors.green;
-            textColor = Colors.green;
-            icon = Icons.check_circle_rounded;
-            iconColor = Colors.green;
-          } else if (isSelected && !isCorrect) {
-            radioColor = theme.colorScheme.error;
-            textColor = theme.colorScheme.error;
-            icon = Icons.cancel_rounded;
-            iconColor = theme.colorScheme.error;
-          } else if (!isSelected && isCorrect) {
-            radioColor = Colors.green;
-            textColor = Colors.green;
-            icon = Icons.check_circle_rounded;
-            iconColor = Colors.green;
+          if (isSelected) {
+            radioColor = isCorrect ? Colors.green : theme.colorScheme.error;
+            textColor = isCorrect ? Colors.green : theme.colorScheme.error;
           }
         } else if (isSelected) {
           radioColor = theme.colorScheme.primary;
@@ -2031,10 +2006,6 @@ class _QuizModeScreenState extends State<QuizModeScreen> {
                   ),
                 ),
               ),
-              if (icon != null) ...[
-                const SizedBox(width: 8),
-                Icon(icon, color: iconColor, size: 20),
-              ],
             ],
           ),
         );

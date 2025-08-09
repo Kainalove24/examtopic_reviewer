@@ -95,6 +95,49 @@ class ScraperApiService {
     }
   }
 
+  // Start scraping job with CSV data
+  static Future<Map<String, dynamic>> startScrapingWithCsv(
+    List<Map<String, dynamic>> csvLinks,
+    String category,
+    String examCode,
+  ) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/scrape-csv'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({
+          'csv_links': csvLinks,
+          'category': category,
+          'exam_code': examCode,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        return json.decode(response.body);
+      } else {
+        final error = json.decode(response.body);
+        return {'error': error['error']};
+      }
+    } catch (e) {
+      return {'error': 'Network error: $e'};
+    }
+  }
+
+  // Download results for completed job
+  static Future<Map<String, dynamic>> downloadResults(String jobId) async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl/download/$jobId'));
+      if (response.statusCode == 200) {
+        return json.decode(response.body);
+      } else {
+        final error = json.decode(response.body);
+        return {'error': error['error']};
+      }
+    } catch (e) {
+      return {'error': 'Network error: $e'};
+    }
+  }
+
   // Download CSV for completed job
   static Future<String?> downloadCsv(String jobId) async {
     try {
@@ -141,7 +184,7 @@ class ScraperApiService {
         final question = ExamQuestion.fromCsv(row);
         questions.add(question);
       } catch (e) {
-        print('Error parsing question: $e');
+        // Error parsing question
       }
     }
 

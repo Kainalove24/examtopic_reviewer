@@ -1,12 +1,11 @@
 import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import '../models/voucher.dart';
 import 'dart:convert'; // Added for jsonEncode
+import '../utils/logger.dart';
 
 class FirebaseVoucherService {
   static final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  static final FirebaseAuth _auth = FirebaseAuth.instance;
 
   static CollectionReference get _vouchersCollection =>
       _firestore.collection('vouchers');
@@ -26,9 +25,11 @@ class FirebaseVoucherService {
       // Generate unique voucher code
       final code = _generateVoucherCode();
 
-      // Create voucher with 3-month expiry
+      // Create voucher with custom expiry duration
       final now = DateTime.now();
-      final expiryDate = now.add(Duration(days: 90)); // 3 months
+      final expiryDate = examExpiryDuration != null
+          ? now.add(examExpiryDuration)
+          : now.add(Duration(days: 90)); // Default 3 months if not specified
 
       final voucher = Voucher(
         id: '', // Will be set by Firestore
@@ -41,24 +42,15 @@ class FirebaseVoucherService {
         expiryDate: expiryDate,
       );
 
-      print('Debug: Creating voucher with examData: ${examData != null}');
-      print('Debug: ExamData keys: ${examData?.keys.toList()}');
-      print(
-        'Debug: ExamData questions count: ${examData?['questions']?.length ?? 0}',
-      );
-
       // Save to Firestore
       final voucherJson = voucher.toJson();
-      print('Debug: Voucher JSON keys: ${voucherJson.keys.toList()}');
-      print('Debug: Voucher JSON examData: ${voucherJson['examData'] != null}');
 
       // Check size of examData (only if embedded)
       if (voucherJson['examData'] != null) {
         final examDataSize = jsonEncode(voucherJson['examData']).length;
-        print('Debug: ExamData size: $examDataSize bytes');
         if (examDataSize > 1000000) {
           // 1MB limit
-          print('Debug: WARNING - ExamData is too large for Firestore!');
+          Logger.warning('WARNING - ExamData is too large for Firestore!');
         }
       }
 
@@ -102,33 +94,24 @@ class FirebaseVoucherService {
         final examDoc = await unlockedCollection.doc(examId).get();
 
         if (examDoc.exists) {
-          print('Debug: Found exam in user_exams collection: $examId');
           return examDoc.data() as Map<String, dynamic>;
         }
       }
 
       // If not found in user_exams, try the exams collection by querying for the examId field
-      print('Debug: Searching in exams collection for examId: $examId');
       final querySnapshot = await _examsCollection
           .where('id', isEqualTo: examId)
           .limit(1)
           .get();
 
-      print('Debug: Query returned ${querySnapshot.docs.length} documents');
-
       if (querySnapshot.docs.isNotEmpty) {
         final doc = querySnapshot.docs.first;
-        print('Debug: Found exam in exams collection: $examId');
-        print('Debug: Document ID: ${doc.id}');
-        final data = doc.data() as Map<String, dynamic>?;
-        print('Debug: Document data keys: ${data?.keys.toList()}');
         return doc.data() as Map<String, dynamic>;
       }
 
-      print('Debug: Exam not found in any collection: $examId');
       return null;
     } catch (e) {
-      print('Error getting exam from cloud: $e');
+      Logger.error('Error getting exam from cloud: $e');
       return null;
     }
   }
@@ -145,7 +128,7 @@ class FirebaseVoucherService {
       });
       return true;
     } catch (e) {
-      print('Error updating exam in cloud: $e');
+      Logger.error('Error updating exam in cloud: $e');
       return false;
     }
   }
@@ -156,7 +139,7 @@ class FirebaseVoucherService {
       await _examsCollection.doc(examId).delete();
       return true;
     } catch (e) {
-      print('Error deleting exam from cloud: $e');
+      Logger.error('Error deleting exam from cloud: $e');
       return false;
     }
   }
@@ -169,7 +152,7 @@ class FirebaseVoucherService {
           .map((doc) => {'id': doc.id, ...doc.data() as Map<String, dynamic>})
           .toList();
     } catch (e) {
-      print('Error getting cloud exams: $e');
+      Logger.error('Error getting cloud exams: $e');
       return [];
     }
   }
@@ -189,16 +172,6 @@ class FirebaseVoucherService {
 
       final doc = querySnapshot.docs.first;
       final voucherData = doc.data() as Map<String, dynamic>;
-
-      print(
-        'Debug: Raw voucher data from Firestore: ${voucherData.keys.toList()}',
-      );
-      print(
-        'Debug: Voucher examData from Firestore: ${voucherData['examData'] != null}',
-      );
-      print(
-        'Debug: Voucher examData keys: ${(voucherData['examData'] as Map<String, dynamic>?)?.keys.toList()}',
-      );
 
       // Convert Firestore Timestamps to ISO strings
       if (voucherData['createdDate'] != null) {
@@ -249,15 +222,15 @@ class FirebaseVoucherService {
 
       // If voucher is used but not expired, still return it for exam data access
       if (!voucher.isExpired) {
-        print(
-          'Debug: Voucher is used but not expired, returning for exam data access',
+        Logger.debug(
+          'Voucher is used but not expired, returning for exam data access',
         );
         return voucher;
       }
 
       return null;
     } catch (e) {
-      print('Error validating cloud voucher: $e');
+      Logger.error('Error validating cloud voucher: $e');
       return null;
     }
   }
@@ -283,7 +256,7 @@ class FirebaseVoucherService {
 
       return true;
     } catch (e) {
-      print('Error redeeming cloud voucher: $e');
+      Logger.error('Error redeeming cloud voucher: $e');
       return false;
     }
   }
@@ -341,7 +314,7 @@ class FirebaseVoucherService {
 
       return vouchers;
     } catch (e) {
-      print('Error getting cloud vouchers: $e');
+      Logger.error('Error getting cloud vouchers: $e');
       return [];
     }
   }
@@ -362,7 +335,7 @@ class FirebaseVoucherService {
 
       return true;
     } catch (e) {
-      print('Error deleting cloud voucher: $e');
+      Logger.error('Error deleting cloud voucher: $e');
       return false;
     }
   }
@@ -373,7 +346,7 @@ class FirebaseVoucherService {
       await _vouchersCollection.doc(voucher.id).update(voucher.toJson());
       return true;
     } catch (e) {
-      print('Error updating cloud voucher: $e');
+      Logger.error('Error updating cloud voucher: $e');
       return false;
     }
   }
@@ -391,7 +364,7 @@ class FirebaseVoucherService {
             (totalVouchers.count ?? 0) - (totalRedeemed.count ?? 0),
       };
     } catch (e) {
-      print('Error getting voucher stats: $e');
+      Logger.error('Error getting voucher stats: $e');
       return {'totalVouchers': 0, 'totalRedeemed': 0, 'activeVouchers': 0};
     }
   }
@@ -410,7 +383,7 @@ class FirebaseVoucherService {
 
       return query.docs.isNotEmpty;
     } catch (e) {
-      print('Error checking user voucher redemption: $e');
+      Logger.error('Error checking user voucher redemption: $e');
       return false;
     }
   }
@@ -428,7 +401,7 @@ class FirebaseVoucherService {
           .map((doc) => doc.data() as Map<String, dynamic>)
           .toList();
     } catch (e) {
-      print('Error getting user redeemed vouchers: $e');
+      Logger.error('Error getting user redeemed vouchers: $e');
       return [];
     }
   }
@@ -448,13 +421,6 @@ class FirebaseVoucherService {
 
       final doc = querySnapshot.docs.first;
       final voucherData = doc.data() as Map<String, dynamic>;
-
-      print(
-        'Debug: getVoucherForUnlock - Raw voucher data: ${voucherData.keys.toList()}',
-      );
-      print(
-        'Debug: getVoucherForUnlock - examData present: ${voucherData['examData'] != null}',
-      );
 
       // Convert Firestore Timestamps to ISO strings
       if (voucherData['createdDate'] != null) {
@@ -500,13 +466,12 @@ class FirebaseVoucherService {
 
       // Return voucher if not expired (regardless of usage status)
       if (!voucher.isExpired) {
-        print('Debug: getVoucherForUnlock - Returning voucher with exam data');
         return voucher;
       }
 
       return null;
     } catch (e) {
-      print('Error getting voucher for unlock: $e');
+      Logger.error('Error getting voucher for unlock: $e');
       return null;
     }
   }

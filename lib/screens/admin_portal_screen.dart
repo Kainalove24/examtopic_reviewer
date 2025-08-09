@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:http/http.dart' as http;
 import '../services/scraper_api_service.dart';
 import '../services/admin_service.dart';
 import '../services/admin_auth_service.dart';
 import '../services/csv_import_service.dart';
+import '../services/admin_portal_cache_service.dart';
+import '../services/optimized_job_polling_service.dart';
 import '../models/exam_question.dart';
 import '../providers/exam_provider.dart';
 import 'cloud_voucher_management_screen.dart';
@@ -41,13 +44,23 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
   String _csvImportStatus = '';
   Map<String, dynamic>? _csvValidationResult;
 
+  // Image Processing Server connection
+  bool _isImageServerConnected = false;
+  bool _isCheckingImageServer = false;
+
+  // Performance tracking
+  int _loadTime = 0;
+  Map<String, dynamic> _cacheStatus = {};
+
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 4, vsync: this);
     _checkAuthentication();
     _checkConnection();
+    _checkImageServerConnection();
     _loadImportedExams();
+    _loadCacheStatus();
   }
 
   Future<void> _checkAuthentication() async {
@@ -63,6 +76,7 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
   @override
   void dispose() {
     _tabController.dispose();
+    OptimizedJobPollingService.stopAllPolling();
     super.dispose();
   }
 
@@ -83,10 +97,123 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
   }
 
   Future<void> _loadCategories() async {
-    final categories = await ScraperApiService.getCategories();
+    final stopwatch = Stopwatch()..start();
+
+    try {
+      // Try to get cached categories first
+      final cachedCategories =
+          await AdminPortalCacheService.getCachedCategories();
+      if (cachedCategories != null) {
+        setState(() {
+          _categories = cachedCategories;
+          _loadTime = stopwatch.elapsedMilliseconds;
+        });
+        print('📚 Categories loaded from cache in ${_loadTime}ms');
+        return;
+      }
+
+      // Fetch fresh categories
+      final categories = await ScraperApiService.getCategories();
+
+      // Cache the categories
+      await AdminPortalCacheService.cacheCategories(categories);
+
+      setState(() {
+        _categories = categories;
+        _loadTime = stopwatch.elapsedMilliseconds;
+      });
+      print('📚 Categories loaded from API in ${_loadTime}ms');
+    } catch (e) {
+      print('Error loading categories: $e');
+    }
+  }
+
+  Future<void> _checkImageServerConnection() async {
     setState(() {
-      _categories = categories;
+      _isCheckingImageServer = true;
     });
+
+    try {
+      final response = await http.get(
+        Uri.parse(
+          'https://image-processing-server-0ski.onrender.com/api/health',
+        ),
+        headers: {'Content-Type': 'application/json'},
+      );
+
+      setState(() {
+        _isImageServerConnected = response.statusCode == 200;
+        _isCheckingImageServer = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isImageServerConnected = false;
+        _isCheckingImageServer = false;
+      });
+    }
+  }
+
+  Future<void> _loadCacheStatus() async {
+    try {
+      final status = await AdminPortalCacheService.getCacheStatus();
+      setState(() {
+        _cacheStatus = status;
+      });
+    } catch (e) {
+      print('Error loading cache status: $e');
+    }
+  }
+
+  void _showCacheInfo() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.cached, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('Cache Status'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Cache Count: ${_cacheStatus['cacheCount'] ?? 0}'),
+            SizedBox(height: 8),
+            Text(
+              'Categories Cached: ${_cacheStatus['hasCategories'] ? 'Yes' : 'No'}',
+            ),
+            Text(
+              'Exams Cached: ${_cacheStatus['hasImportedExams'] ? 'Yes' : 'No'}',
+            ),
+            Text('Jobs Cached: ${_cacheStatus['hasJobs'] ? 'Yes' : 'No'}'),
+            SizedBox(height: 16),
+            Text(
+              'Cache improves performance by storing frequently accessed data locally.',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+          TextButton(
+            onPressed: () async {
+              await AdminPortalCacheService.clearAllCaches();
+              await _loadCacheStatus();
+              Navigator.pop(context);
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(SnackBar(content: Text('Cache cleared')));
+            },
+            child: Text('Clear Cache'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _loadExams(String category) async {
@@ -94,11 +221,36 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
       _isLoading = true;
     });
 
-    final exams = await ScraperApiService.getExamsForCategory(category);
-    setState(() {
-      _exams = exams;
-      _isLoading = false;
-    });
+    try {
+      // Try to get cached exams first
+      final cachedExams =
+          await AdminPortalCacheService.getCachedExamsForCategory(category);
+      if (cachedExams != null) {
+        setState(() {
+          _exams = cachedExams;
+          _isLoading = false;
+        });
+        print('📚 Exams loaded from cache for category: $category');
+        return;
+      }
+
+      // Fetch fresh exams
+      final exams = await ScraperApiService.getExamsForCategory(category);
+
+      // Cache the exams
+      await AdminPortalCacheService.cacheExamsForCategory(category, exams);
+
+      setState(() {
+        _exams = exams;
+        _isLoading = false;
+      });
+      print('📚 Exams loaded from API for category: $category');
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+      });
+      print('Error loading exams: $e');
+    }
   }
 
   Future<void> _startScraping() async {
@@ -139,42 +291,47 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
   }
 
   Future<void> _pollJobStatus() async {
-    while (true) {
-      await Future.delayed(Duration(seconds: 2));
-
-      final status = await ScraperApiService.getJobStatus(_currentJobId);
-
-      if (status.containsKey('error')) {
+    OptimizedJobPollingService.startPolling(
+      _currentJobId,
+      (status) {
+        // Status update callback
+        setState(() {
+          _progress = status['progress'] ?? 0;
+          _status = 'Status: ${status['status']} ($_progress%)';
+        });
+      },
+      (jobId) {
+        // Completion callback
+        _handleJobCompletion(jobId);
+      },
+      (error) {
+        // Error callback
         setState(() {
           _isLoading = false;
-          _status = 'Error: ${status['error']}';
+          _status = 'Error: $error';
         });
-        return;
-      }
+      },
+    );
+  }
 
+  Future<void> _handleJobCompletion(String jobId) async {
+    try {
+      final status = await ScraperApiService.getJobStatus(jobId);
+      final csvContent = status['result']['csv_content'];
+
+      if (csvContent != null) {
+        final questions = ScraperApiService.parseCsvContent(csvContent);
+        setState(() {
+          _questions = questions;
+          _isLoading = false;
+          _status = 'Completed! Found ${questions.length} questions';
+        });
+      }
+    } catch (e) {
       setState(() {
-        _progress = status['progress'] ?? 0;
-        _status = 'Status: ${status['status']} ($_progress%)';
+        _isLoading = false;
+        _status = 'Error getting job results: $e';
       });
-
-      if (status['status'] == 'completed') {
-        final csvContent = status['result']['csv_content'];
-        if (csvContent != null) {
-          final questions = ScraperApiService.parseCsvContent(csvContent);
-          setState(() {
-            _questions = questions;
-            _isLoading = false;
-            _status = 'Completed! Found ${questions.length} questions';
-          });
-        }
-        return;
-      } else if (status['status'] == 'failed') {
-        setState(() {
-          _isLoading = false;
-          _status = 'Failed: ${status['error']}';
-        });
-        return;
-      }
     }
   }
 
@@ -228,16 +385,34 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
     });
 
     try {
+      // Try to get cached exams first
+      final cachedExams =
+          await AdminPortalCacheService.getCachedImportedExams();
+      if (cachedExams != null) {
+        setState(() {
+          _importedExams = cachedExams;
+          _isLoadingExams = false;
+        });
+        print('📚 Imported exams loaded from cache');
+        return;
+      }
+
+      // Fetch fresh exams
       final exams = await AdminService.getImportedExams();
+
+      // Cache the exams
+      await AdminPortalCacheService.cacheImportedExams(exams);
+
       setState(() {
         _importedExams = exams;
+        _isLoadingExams = false;
       });
+      print('📚 Imported exams loaded from API');
     } catch (e) {
-      print('Error loading exams: $e');
-    } finally {
       setState(() {
         _isLoadingExams = false;
       });
+      print('Error loading exams: $e');
     }
   }
 
@@ -270,7 +445,7 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
             'format': format,
           };
           _csvImportStatus =
-              'CSV parsed successfully! Found ${questions.length} valid questions (${format} format)';
+              'CSV parsed successfully! Found ${questions.length} valid questions ($format format)';
 
           if (imageConversions.isNotEmpty) {
             _csvImportStatus += '\n${imageConversions.length} images processed';
@@ -419,6 +594,38 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
             tooltip: _isConnected ? 'Connected' : 'Disconnected',
           ),
           IconButton(
+            icon: Stack(
+              children: [
+                Icon(Icons.cached),
+                if (_cacheStatus['cacheCount'] != null &&
+                    _cacheStatus['cacheCount'] > 0)
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    child: Container(
+                      padding: EdgeInsets.all(2),
+                      decoration: BoxDecoration(
+                        color: Colors.green,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      constraints: BoxConstraints(minWidth: 12, minHeight: 12),
+                      child: Text(
+                        '${_cacheStatus['cacheCount']}',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 8,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            onPressed: () => _showCacheInfo(),
+            tooltip: 'Cache Status',
+          ),
+          IconButton(
             icon: Icon(Icons.swap_horiz),
             onPressed: () {
               // Switch to regular app
@@ -543,6 +750,15 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
                             fontSize: 12,
                           ),
                         ),
+                        if (_loadTime > 0)
+                          Text(
+                            'Loaded in ${_loadTime}ms',
+                            style: TextStyle(
+                              color: Colors.green,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -580,6 +796,52 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
                 ),
               ),
             ],
+          ),
+          SizedBox(height: 16),
+
+          // Enhanced Scraper Integration Button
+          Card(
+            elevation: 4,
+            child: Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.auto_awesome, color: Colors.purple),
+                      SizedBox(width: 8),
+                      Text(
+                        'Enhanced Scraper Integration',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                        ),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'Advanced scraping with CSV import, data editing, and exam creation',
+                    style: TextStyle(color: Colors.grey[600], fontSize: 14),
+                  ),
+                  SizedBox(height: 16),
+                  ElevatedButton.icon(
+                    onPressed: () => context.go('/enhanced-scraper'),
+                    icon: Icon(Icons.rocket_launch),
+                    label: Text('Open Enhanced Scraper'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.purple,
+                      foregroundColor: Colors.white,
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
           SizedBox(height: 16),
 
@@ -779,7 +1041,7 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
                       ],
                     ),
                     SizedBox(height: 12),
-                    Container(
+                    SizedBox(
                       height: 200,
                       child: ListView.builder(
                         itemCount: _questions.length > 5
@@ -837,7 +1099,7 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
 
   Widget _buildJobsTab() {
     return FutureBuilder<List<Map<String, dynamic>>>(
-      future: ScraperApiService.listJobs(),
+      future: OptimizedJobPollingService.preloadJobs(),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return Center(child: CircularProgressIndicator());
@@ -907,7 +1169,7 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
                   ),
                 )
               else
-                ...jobs.map((job) => _buildJobCard(job)).toList(),
+                ...jobs.map((job) => _buildJobCard(job)),
             ],
           ),
         );
@@ -1236,7 +1498,7 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
       context: context,
       builder: (context) => AlertDialog(
         title: Text('Available Categories'),
-        content: Container(
+        content: SizedBox(
           width: double.maxFinite,
           child: ListView.builder(
             shrinkWrap: true,
@@ -1275,7 +1537,7 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
       context: context,
       builder: (context) => AlertDialog(
         title: Text('Scraping Results'),
-        content: Container(
+        content: SizedBox(
           width: double.maxFinite,
           height: 400,
           child: ListView.builder(
@@ -1420,6 +1682,79 @@ class _AdminPortalScreenState extends State<AdminPortalScreen>
                     ],
                   ),
                   SizedBox(height: 16),
+
+                  // Image Processing Server Connection Status
+                  Container(
+                    padding: EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: _isImageServerConnected
+                          ? Colors.green[50]
+                          : Colors.red[50],
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: _isImageServerConnected
+                            ? Colors.green
+                            : Colors.red,
+                        width: 1,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          _isCheckingImageServer
+                              ? Icons.sync
+                              : (_isImageServerConnected
+                                    ? Icons.check_circle
+                                    : Icons.error),
+                          color: _isCheckingImageServer
+                              ? Colors.blue
+                              : (_isImageServerConnected
+                                    ? Colors.green
+                                    : Colors.red),
+                          size: 20,
+                        ),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _isCheckingImageServer
+                                    ? 'Checking Image Processing Server...'
+                                    : (_isImageServerConnected
+                                          ? 'Image Processing Server Connected'
+                                          : 'Image Processing Server Disconnected'),
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: _isCheckingImageServer
+                                      ? Colors.blue
+                                      : (_isImageServerConnected
+                                            ? Colors.green
+                                            : Colors.red),
+                                ),
+                              ),
+                              SizedBox(height: 2),
+                              Text(
+                                'Server: https://image-processing-server-0ski.onrender.com',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey[600],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (!_isCheckingImageServer)
+                          IconButton(
+                            icon: Icon(Icons.refresh, size: 16),
+                            onPressed: _checkImageServerConnection,
+                            tooltip: 'Refresh Connection',
+                          ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(height: 16),
+
                   Text(
                     'Import exam questions from a CSV file. Uses the standard format:',
                     style: TextStyle(color: Colors.grey[600]),

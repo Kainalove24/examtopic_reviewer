@@ -3,6 +3,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../models/exam_question.dart';
+import '../utils/logger.dart';
+import '../services/admin_auth_service.dart'; // Added import for AdminAuthService
 
 class UserExamService {
   static const String _userExamsKey = 'user_unlocked_exams';
@@ -16,14 +18,23 @@ class UserExamService {
   static Future<List<Map<String, dynamic>>> getUserExams() async {
     final user = _auth.currentUser;
 
-    if (user == null || user.isAnonymous) {
-      // Guest mode - use local storage only
-      print('Debug: getUserExams - Guest mode, using local storage');
+    // Check if user is admin (admin users don't use Firebase Auth)
+    bool isAdmin = false;
+    try {
+      isAdmin = await AdminAuthService.isAuthenticated();
+    } catch (e) {
+      isAdmin = false;
+    }
+
+    if (isAdmin) {
+      // Admin mode - use local storage only
       return _getLocalUserExams();
-    } else {
+    } else if (user != null && !user.isAnonymous) {
       // Authenticated user - sync with cloud and merge with local
-      print('Debug: getUserExams - Authenticated user, syncing with cloud storage');
       return await _getCloudUserExamsWithLocalSync(user.uid);
+    } else {
+      // Guest mode - only show built-in exams (no unlocked exams since guests can't redeem vouchers)
+      return _getLocalUserExams();
     }
   }
 
@@ -33,18 +44,11 @@ class UserExamService {
 
     // Get unlocked exams (from vouchers)
     final unlockedExamsJson = prefs.getStringList(_userExamsKey) ?? [];
-    print(
-      'Debug: _getLocalUserExams - Found ${unlockedExamsJson.length} unlocked exams in local storage',
-    );
 
     final unlockedExams = unlockedExamsJson
         .map((json) => Map<String, dynamic>.from(jsonDecode(json)))
         .where((exam) => !_isExpired(exam)) // Filter out expired exams
         .toList();
-
-    print(
-      'Debug: _getLocalUserExams - After filtering expired: ${unlockedExams.length} unlocked exams',
-    );
 
     // Get user imported exams
     final userImportedExamsJson =
@@ -55,17 +59,6 @@ class UserExamService {
 
     // Combine all exams
     final allExams = [...unlockedExams, ...userImportedExams];
-    print(
-      'Debug: _getLocalUserExams - Total exams returned: ${allExams.length}',
-    );
-
-    // Debug: Print exam details
-    for (final exam in allExams) {
-      print(
-        'Debug: Exam - ID: ${exam['id']}, Title: ${exam['title']}, Type: ${exam['type']}',
-      );
-    }
-
     return allExams;
   }
 
@@ -101,7 +94,7 @@ class UserExamService {
       final allExams = [...unlockedExams, ...importedExams];
       return allExams;
     } catch (e) {
-      print('Error getting cloud user exams: $e');
+      Logger.error('Error getting cloud user exams: $e');
       // Fallback to local storage
       return _getLocalUserExams();
     }
@@ -114,11 +107,9 @@ class UserExamService {
     try {
       // Get cloud exams
       final cloudExams = await _getCloudUserExams(userId);
-      print('Debug: Found ${cloudExams.length} exams in cloud storage');
 
       // Get local exams
       final localExams = await _getLocalUserExams();
-      print('Debug: Found ${localExams.length} exams in local storage');
 
       // Merge cloud and local exams, prioritizing cloud data
       final mergedExams = <Map<String, dynamic>>[];
@@ -133,17 +124,15 @@ class UserExamService {
       // Add local exams that aren't in cloud
       for (final localExam in localExams) {
         if (!processedIds.contains(localExam['id'])) {
-          print('Debug: Adding local exam to cloud: ${localExam['title']}');
           // Upload local exam to cloud
           await _uploadLocalExamToCloud(userId, localExam);
           mergedExams.add(localExam);
         }
       }
 
-      print('Debug: Total merged exams: ${mergedExams.length}');
       return mergedExams;
     } catch (e) {
-      print('Error syncing cloud and local exams: $e');
+      Logger.error('Error syncing cloud and local exams: $e');
       // Fallback to local storage
       return _getLocalUserExams();
     }
@@ -174,7 +163,7 @@ class UserExamService {
             .set(examData);
       }
     } catch (e) {
-      print('Error uploading local exam to cloud: $e');
+      Logger.error('Error uploading local exam to cloud: $e');
     }
   }
 
@@ -187,7 +176,7 @@ class UserExamService {
       final expiry = DateTime.parse(expiryDate);
       return DateTime.now().isAfter(expiry);
     } catch (e) {
-      print('Error parsing expiry date: $e');
+      Logger.error('Error parsing expiry date: $e');
       return false;
     }
   }
@@ -199,29 +188,32 @@ class UserExamService {
     Duration? expiryDuration, // Optional expiry duration
   }) async {
     try {
-      print('Debug: unlockExam called - examId: $examId');
-      print('Debug: examData keys: ${examData.keys.toList()}');
-      print('Debug: examData title: ${examData['title']}');
-      print(
-        'Debug: examData questions count: ${examData['questions']?.length ?? 0}',
-      );
-
       final user = _auth.currentUser;
       final expiryDate = expiryDuration != null
           ? DateTime.now().add(expiryDuration).toIso8601String()
           : null;
 
-      if (user == null || user.isAnonymous) {
-        // Guest mode - use local storage
-        print('Debug: Using local storage for exam unlock');
+      // Check if user is admin (admin users don't use Firebase Auth)
+      bool isAdmin = false;
+      try {
+        isAdmin = await AdminAuthService.isAuthenticated();
+      } catch (e) {
+        isAdmin = false;
+      }
+
+      // Note: Guest users can no longer redeem vouchers, so we only handle authenticated users and admins
+      if (isAdmin) {
+        // Admin mode - use local storage
         return await _unlockExamLocal(examId, examData, expiryDate);
-      } else {
+      } else if (user != null && !user.isAnonymous) {
         // Authenticated user - use cloud storage
-        print('Debug: Using cloud storage for exam unlock');
         return await _unlockExamCloud(user.uid, examId, examData, expiryDate);
+      } else {
+        // This should not happen since guest users are blocked from voucher redemption
+        return false;
       }
     } catch (e) {
-      print('Error unlocking exam: $e');
+      Logger.error('Error unlocking exam: $e');
       return false;
     }
   }
@@ -232,13 +224,6 @@ class UserExamService {
     Map<String, dynamic> examData,
     String? expiryDate,
   ) async {
-    print('Debug: _unlockExamLocal called - examId: $examId');
-    print('Debug: examData keys: ${examData.keys.toList()}');
-    print('Debug: examData title: ${examData['title']}');
-    print(
-      'Debug: examData questions count: ${examData['questions']?.length ?? 0}',
-    );
-
     final prefs = await SharedPreferences.getInstance();
     final unlockedExamsJson = prefs.getStringList(_userExamsKey) ?? [];
 
@@ -248,7 +233,6 @@ class UserExamService {
         .toList();
 
     if (existingExams.any((exam) => exam['id'] == examId)) {
-      print('Debug: Exam already unlocked: $examId');
       return true; // Already unlocked
     }
 
@@ -261,26 +245,15 @@ class UserExamService {
       ...examData,
     };
 
-    print('Debug: Saving exam to local storage: ${examToUnlock['title']}');
-    print('Debug: Exam data to save: ${examToUnlock.keys.toList()}');
-    print(
-      'Debug: Questions data type: ${examToUnlock['questions']?.runtimeType}',
-    );
-    print('Debug: Questions count: ${examToUnlock['questions']?.length ?? 0}');
-
-    // Debug: Print first question structure
-    if (examToUnlock['questions'] != null &&
-        (examToUnlock['questions'] as List).isNotEmpty) {
-      print(
-        'Debug: First question structure: ${(examToUnlock['questions'] as List).first}',
-      );
-    }
-
     unlockedExamsJson.add(jsonEncode(examToUnlock));
-    await prefs.setStringList(_userExamsKey, unlockedExamsJson);
 
-    print('Debug: Exam successfully unlocked and saved to local storage');
-    return true;
+    try {
+      await prefs.setStringList(_userExamsKey, unlockedExamsJson);
+      return true;
+    } catch (e) {
+      Logger.error('Error saving to SharedPreferences: $e');
+      return false;
+    }
   }
 
   // Unlock exam in cloud storage (authenticated users)
@@ -318,7 +291,7 @@ class UserExamService {
 
       return true;
     } catch (e) {
-      print('Error unlocking exam in cloud: $e');
+      Logger.error('Error unlocking exam in cloud: $e');
       return false;
     }
   }
@@ -336,7 +309,7 @@ class UserExamService {
         return await _addUserImportedExamCloud(user.uid, examData);
       }
     } catch (e) {
-      print('Error adding user imported exam: $e');
+      Logger.error('Error adding user imported exam: $e');
       return false;
     }
   }
@@ -403,7 +376,7 @@ class UserExamService {
 
       return true;
     } catch (e) {
-      print('Error adding user imported exam to cloud: $e');
+      Logger.error('Error adding user imported exam to cloud: $e');
       return false;
     }
   }
@@ -421,7 +394,7 @@ class UserExamService {
         return await _getExamQuestionsCloud(user.uid, examId);
       }
     } catch (e) {
-      print('Error getting exam questions: $e');
+      Logger.error('Error getting exam questions: $e');
       return [];
     }
   }
@@ -509,7 +482,7 @@ class UserExamService {
 
       return [];
     } catch (e) {
-      print('Error getting exam questions from cloud: $e');
+      Logger.error('Error getting exam questions from cloud: $e');
       return [];
     }
   }
@@ -520,7 +493,7 @@ class UserExamService {
       final userExams = await getUserExams();
       return userExams.any((exam) => exam['id'] == examId);
     } catch (e) {
-      print('Error checking exam access: $e');
+      Logger.error('Error checking exam access: $e');
       return false;
     }
   }
@@ -538,7 +511,7 @@ class UserExamService {
         return await _removeUserImportedExamCloud(user.uid, examId);
       }
     } catch (e) {
-      print('Error removing user imported exam: $e');
+      Logger.error('Error removing user imported exam: $e');
       return false;
     }
   }
@@ -572,7 +545,7 @@ class UserExamService {
           .delete();
       return true;
     } catch (e) {
-      print('Error removing user imported exam from cloud: $e');
+      Logger.error('Error removing user imported exam from cloud: $e');
       return false;
     }
   }
@@ -590,7 +563,7 @@ class UserExamService {
         await _cleanupExpiredExamsCloud(user.uid);
       }
     } catch (e) {
-      print('Error cleaning up expired exams: $e');
+      Logger.error('Error cleaning up expired exams: $e');
     }
   }
 
@@ -630,7 +603,7 @@ class UserExamService {
 
       await batch.commit();
     } catch (e) {
-      print('Error cleaning up expired exams from cloud: $e');
+      Logger.error('Error cleaning up expired exams from cloud: $e');
     }
   }
 }

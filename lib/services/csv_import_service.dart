@@ -8,6 +8,7 @@ import '../data/imported_exam_storage.dart';
 import '../services/admin_service.dart';
 import '../services/user_exam_service.dart';
 import '../config/server_config.dart';
+import '../utils/logger.dart';
 
 class CsvImportService {
   // Support both scraper format and custom format
@@ -182,40 +183,49 @@ class CsvImportService {
 
     // Process question images
     if (questionImagesStr.isNotEmpty) {
-      print('Processing question images: $questionImagesStr');
+      Logger.debug('Processing question images: $questionImagesStr');
       final urls = questionImagesStr
           .split('|')
           .map((e) => e.trim())
           .where((e) => e.isNotEmpty)
           .toList();
-      print('Found ${urls.length} image URLs to process');
+      Logger.debug('Found ${urls.length} image URLs to process');
       for (final url in urls) {
-        print('Processing image URL: $url');
+        Logger.debug('Processing image URL: $url');
         if (url.startsWith('http')) {
+          // Check if URL is already processed (from our server)
+          if (url.contains('image-processing-server') &&
+              url.contains('onrender.com')) {
+            Logger.debug('Using already processed image: $url');
+            questionImages.add(url);
+            imageConversions.add('Already processed: $url');
+            continue;
+          }
+
           // Convert URL to Base64
           final base64Result = await _convertImageUrlToBase64(url);
           if (base64Result['success']) {
             questionImages.add(base64Result['base64']);
             imageConversions.add('Converted: $url');
-            print('Successfully converted image: $url');
+            Logger.debug('Successfully converted image: $url');
           } else {
             // Keep original URL if conversion fails - this will work as a network image
             questionImages.add(url);
             imageConversions.add(
               'Failed to convert: $url (${base64Result['error']}) - keeping as network URL',
             );
-            print(
+            Logger.debug(
               'Failed to convert image: $url - ${base64Result['error']} - keeping as network URL',
             );
           }
         } else if (url.startsWith('data:image')) {
           // Already Base64
           questionImages.add(url);
-          print('Image already in Base64 format: $url');
+          Logger.debug('Image already in Base64 format: $url');
         } else {
           // Local file or other format
           questionImages.add(url);
-          print('Added local image: $url');
+          Logger.debug('Added local image: $url');
         }
       }
     }
@@ -229,6 +239,15 @@ class CsvImportService {
           .toList();
       for (final url in urls) {
         if (url.startsWith('http')) {
+          // Check if URL is already processed (from our server)
+          if (url.contains('image-processing-server') &&
+              url.contains('onrender.com')) {
+            Logger.debug('Using already processed image: $url');
+            answerImages.add(url);
+            imageConversions.add('Already processed: $url');
+            continue;
+          }
+
           // Convert URL to Base64
           final base64Result = await _convertImageUrlToBase64(url);
           if (base64Result['success']) {
@@ -345,7 +364,7 @@ class CsvImportService {
     String imageUrl,
   ) async {
     try {
-      print('Processing image URL through server: $imageUrl');
+      Logger.debug('Processing image URL through server: $imageUrl');
 
       // Use the image processing server
       final response = await http
@@ -367,7 +386,7 @@ class CsvImportService {
             final processedUrl = ServerConfig.getProcessedImageUrl(
               processedImages.first,
             );
-            print('Successfully processed image: $processedUrl');
+            Logger.debug('Successfully processed image: $processedUrl');
             return {'success': true, 'base64': processedUrl, 'size_bytes': 0};
           }
         }
@@ -377,14 +396,14 @@ class CsvImportService {
         final errorMsg = errors.isNotEmpty
             ? errors.first
             : 'Unknown server error';
-        print('Server processing failed: $errorMsg');
+        Logger.debug('Server processing failed: $errorMsg');
         return {'success': false, 'error': errorMsg};
       } else {
-        print('Failed to process image: HTTP ${response.statusCode}');
+        Logger.debug('Failed to process image: HTTP ${response.statusCode}');
         return {'success': false, 'error': 'HTTP ${response.statusCode}'};
       }
     } catch (e) {
-      print('Error processing image URL: $e');
+      Logger.error('Error processing image URL: $e');
       return {'success': false, 'error': e.toString()};
     }
   }

@@ -17,12 +17,12 @@ class ServerConfig {
   static String get statsUrl => '$imageProcessingServerUrl$statsEndpoint';
 
   // Timeout settings
-  static const Duration requestTimeout = Duration(seconds: 30);
-  static const Duration imageProcessingTimeout = Duration(seconds: 60);
+  static const Duration requestTimeout = Duration(seconds: 60);
+  static const Duration imageProcessingTimeout = Duration(seconds: 120);
 
   // Retry settings
   static const int maxRetries = 3;
-  static const Duration retryDelay = Duration(seconds: 2);
+  static const Duration retryDelay = Duration(seconds: 5);
 
   // Validation
   static bool get isServerConfigured => imageProcessingServerUrl.isNotEmpty;

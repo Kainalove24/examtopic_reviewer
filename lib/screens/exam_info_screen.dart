@@ -3,13 +3,14 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:http/http.dart' as http;
 import 'dart:io';
+import 'dart:async';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import '../providers/progress_provider.dart';
 import '../providers/exam_provider.dart';
-import '../providers/settings_provider.dart';
 import '../services/ai_service.dart';
-import '../widgets/enhanced_image_viewer.dart';
+import '../services/optimized_image_service.dart';
+import '../widgets/optimized_question_card.dart';
 
 class ExamInfoScreen extends StatefulWidget {
   final String examTitle;
@@ -43,6 +44,7 @@ class _ExamInfoScreenState extends State<ExamInfoScreen> {
   String searchQuery = '';
   List<Map<String, dynamic>> filteredQuestions = [];
   late TextEditingController searchController;
+  Timer? _searchDebounceTimer;
 
   List<bool> showAnswer = [];
   bool _isHeaderCollapsed = false;
@@ -61,6 +63,19 @@ class _ExamInfoScreenState extends State<ExamInfoScreen> {
     filteredQuestions = widget.questions;
     searchController = TextEditingController();
     _loadProgress();
+    _preloadImages();
+    _preDownloadImagesForOffline(); // NEW: Pre-download for offline access
+  }
+
+  // NEW: Pre-download all images for offline access
+  Future<void> _preDownloadImagesForOffline() async {
+    try {
+      print('🔄 Starting offline image preparation...');
+      await OptimizedImageService.preDownloadExamImages(widget.questions);
+      print('✅ Offline image preparation complete');
+    } catch (e) {
+      print('❌ Error preparing offline images: $e');
+    }
   }
 
   // Question management methods
@@ -350,212 +365,122 @@ class _ExamInfoScreenState extends State<ExamInfoScreen> {
 
   // Helper method to build image widget that handles local files, assets, and network images
   Widget _buildImageWidget(String imagePath) {
-    // Check if it's a network image (starts with 'http://' or 'https://')
-    if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
-      // It's a network image, use Image.network
-      return GestureDetector(
-        onTap: () => _showImageDialog(context, imagePath),
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey.shade300),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.network(
-              imagePath,
-              height: 120,
-              fit: BoxFit.contain,
-              loadingBuilder: (context, child, loadingProgress) {
-                if (loadingProgress == null) return child;
-                return Container(
-                  color: Colors.grey.shade100,
-                  height: 120,
-                  width: 120,
-                  child: Center(
-                    child: CircularProgressIndicator(
-                      value: loadingProgress.expectedTotalBytes != null
-                          ? loadingProgress.cumulativeBytesLoaded /
-                                loadingProgress.expectedTotalBytes!
-                          : null,
-                    ),
-                  ),
-                );
-              },
-              errorBuilder: (context, error, stackTrace) {
-                print('Network image error: $error');
-                return Container(
-                  color: Colors.red.shade100,
-                  height: 120,
-                  width: 120,
-                  child: const Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.broken_image, color: Colors.red),
-                        SizedBox(height: 4),
-                        Text('Image not found', style: TextStyle(fontSize: 10)),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-        ),
-      );
-    } else if (imagePath.startsWith('images/')) {
-      // It's a local file, use Image.file
-      return FutureBuilder<String?>(
-        future: _getLocalImagePath(imagePath),
-        builder: (context, snapshot) {
-          if (snapshot.hasData && snapshot.data != null) {
-            return GestureDetector(
-              onTap: () => _showImageDialog(context, snapshot.data!),
-              child: Container(
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.grey.shade300),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.file(
-                    File(snapshot.data!),
-                    height: 120,
-                    fit: BoxFit.contain,
-                    errorBuilder: (context, error, stackTrace) {
-                      print('Image file error: $error');
-                      return Container(
-                        color: Colors.red.shade100,
+    return FutureBuilder<String?>(
+      future: OptimizedImageService.loadImage(imagePath),
+      builder: (context, snapshot) {
+        if (snapshot.hasData && snapshot.data != null) {
+          final loadedPath = snapshot.data!;
+          return GestureDetector(
+            onTap: () => _showImageDialog(context, loadedPath),
+            child: Container(
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey.shade300),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child:
+                    loadedPath.startsWith('http://') ||
+                        loadedPath.startsWith('https://')
+                    ? Image.network(
+                        loadedPath,
                         height: 120,
-                        width: 120,
-                        child: const Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.broken_image, color: Colors.red),
-                              SizedBox(height: 4),
-                              Text(
-                                'Image not found',
-                                style: TextStyle(fontSize: 10),
+                        fit: BoxFit.contain,
+                        loadingBuilder: (context, child, loadingProgress) {
+                          if (loadingProgress == null) return child;
+                          return Container(
+                            color: Colors.grey.shade100,
+                            height: 120,
+                            width: 120,
+                            child: Center(
+                              child: CircularProgressIndicator(
+                                value:
+                                    loadingProgress.expectedTotalBytes != null
+                                    ? loadingProgress.cumulativeBytesLoaded /
+                                          loadingProgress.expectedTotalBytes!
+                                    : null,
                               ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ),
+                            ),
+                          );
+                        },
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            color: Colors.red.shade100,
+                            height: 120,
+                            width: 120,
+                            child: const Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.broken_image, color: Colors.red),
+                                  SizedBox(height: 4),
+                                  Text(
+                                    'Image not found',
+                                    style: TextStyle(fontSize: 10),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      )
+                    : Image.file(
+                        File(loadedPath),
+                        height: 120,
+                        fit: BoxFit.contain,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            color: Colors.red.shade100,
+                            height: 120,
+                            width: 120,
+                            child: const Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.broken_image, color: Colors.red),
+                                  SizedBox(height: 4),
+                                  Text(
+                                    'Image not found',
+                                    style: TextStyle(fontSize: 10),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
               ),
-            );
-          } else if (snapshot.hasError) {
-            print('FutureBuilder error: ${snapshot.error}');
-            return Container(
-              color: Colors.red.shade100,
-              height: 120,
-              width: 120,
-              child: const Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.error, color: Colors.red),
-                    SizedBox(height: 4),
-                    Text('Error loading image', style: TextStyle(fontSize: 10)),
-                  ],
-                ),
-              ),
-            );
-          } else {
-            return Container(
-              color: Colors.grey.shade100,
-              height: 120,
-              width: 120,
-              child: const Center(child: CircularProgressIndicator()),
-            );
-          }
-        },
-      );
-    } else {
-      // It's an asset, use Image.asset
-      return GestureDetector(
-        onTap: () => _showImageDialog(context, imagePath),
-        child: Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey.shade300),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.asset(
-              imagePath,
-              height: 120,
-              fit: BoxFit.contain,
-              errorBuilder: (context, error, stackTrace) {
-                print('Image asset error: $error');
-                return Container(
-                  color: Colors.red.shade100,
-                  height: 120,
-                  width: 120,
-                  child: const Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.broken_image, color: Colors.red),
-                        SizedBox(height: 4),
-                        Text('Image not found', style: TextStyle(fontSize: 10)),
-                      ],
-                    ),
-                  ),
-                );
-              },
             ),
-          ),
-        ),
-      );
-    }
+          );
+        } else if (snapshot.hasError) {
+          return Container(
+            color: Colors.red.shade100,
+            height: 120,
+            width: 120,
+            child: const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.error, color: Colors.red),
+                  SizedBox(height: 4),
+                  Text('Error loading image', style: TextStyle(fontSize: 10)),
+                ],
+              ),
+            ),
+          );
+        } else {
+          return Container(
+            color: Colors.grey.shade100,
+            height: 120,
+            width: 120,
+            child: const Center(child: CircularProgressIndicator()),
+          );
+        }
+      },
+    );
   }
 
   // Helper method to get the full path for local images
-  Future<String?> _getLocalImagePath(String relativePath) async {
-    try {
-      print('Debug: Looking for image at relative path: $relativePath');
-      final appDir = await getApplicationDocumentsDirectory();
-      final fullPath = path.join(appDir.path, relativePath);
-      print('Debug: Full path: $fullPath');
-
-      final file = File(fullPath);
-      final exists = await file.exists();
-      print('Debug: File exists: $exists');
-
-      if (exists) {
-        final size = await file.length();
-        print('Debug: File size: $size bytes');
-        return fullPath;
-      } else {
-        print('Debug: File does not exist at: $fullPath');
-        // Try alternative paths
-        final altPaths = [
-          path.join(appDir.path, 'images', path.basename(relativePath)),
-          path.join(appDir.path, 'assets', relativePath),
-          relativePath, // Try as absolute path
-        ];
-
-        for (final altPath in altPaths) {
-          final altFile = File(altPath);
-          if (await altFile.exists()) {
-            print('Debug: Found image at alternative path: $altPath');
-            return altPath;
-          }
-        }
-
-        print('Debug: Image not found in any alternative paths');
-        return null;
-      }
-    } catch (e) {
-      print('Error getting local image path: $e');
-      return null;
-    }
-  }
 
   // Helper method to show image in a full-screen zoomable dialog
   void _showImageDialog(BuildContext context, String imagePath) {
@@ -665,55 +590,67 @@ class _ExamInfoScreenState extends State<ExamInfoScreen> {
   }
 
   String? progressError;
+  int _loadTime = 0;
 
   void _performSearch(String query) {
-    setState(() {
-      searchQuery = query;
-      if (query.isEmpty) {
-        filteredQuestions = widget.questions;
-        currentPage = 0;
-      } else {
-        // Search by question number, question text, or options
-        filteredQuestions = widget.questions.where((q) {
-          final questionText = (q['text'] ?? '').toString().toLowerCase();
-          final questionNumber = (widget.questions.indexOf(q) + 1).toString();
-          final queryLower = query.toLowerCase();
+    // Cancel previous timer
+    _searchDebounceTimer?.cancel();
 
-          // Check if query matches question number
-          if (questionNumber.contains(queryLower)) {
-            return true;
-          }
+    // Debounce search for better performance
+    _searchDebounceTimer = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) {
+        setState(() {
+          searchQuery = query;
+          if (query.isEmpty) {
+            filteredQuestions = widget.questions;
+            currentPage = 0;
+          } else {
+            // Search by question number, question text, or options
+            filteredQuestions = widget.questions.where((q) {
+              final questionText = (q['text'] ?? '').toString().toLowerCase();
+              final questionNumber = (widget.questions.indexOf(q) + 1)
+                  .toString();
+              final queryLower = query.toLowerCase();
 
-          // Check if query matches keywords in question text
-          if (questionText.contains(queryLower)) {
-            return true;
-          }
-
-          // Check if query matches any option text
-          final options = q['options'] as List?;
-          if (options != null) {
-            for (final option in options) {
-              final optionText = option.toString().toLowerCase();
-              if (optionText.contains(queryLower)) {
+              // Check if query matches question number
+              if (questionNumber.contains(queryLower)) {
                 return true;
               }
-            }
-          }
 
-          return false;
-        }).toList();
-        currentPage = 0; // Reset to first page when searching
+              // Check if query matches keywords in question text
+              if (questionText.contains(queryLower)) {
+                return true;
+              }
+
+              // Check if query matches any option text
+              final options = q['options'] as List?;
+              if (options != null) {
+                for (final option in options) {
+                  final optionText = option.toString().toLowerCase();
+                  if (optionText.contains(queryLower)) {
+                    return true;
+                  }
+                }
+              }
+
+              return false;
+            }).toList();
+            currentPage = 0; // Reset to first page when searching
+          }
+        });
       }
     });
   }
 
   @override
   void dispose() {
+    _searchDebounceTimer?.cancel();
     searchController.dispose();
     super.dispose();
   }
 
   Future<void> _loadProgress() async {
+    final stopwatch = Stopwatch()..start();
     final progressProvider = Provider.of<ProgressProvider>(
       context,
       listen: false,
@@ -727,16 +664,30 @@ class _ExamInfoScreenState extends State<ExamInfoScreen> {
         mastered = masteredList.length;
         loading = false;
         progressError = null;
+        _loadTime = stopwatch.elapsedMilliseconds;
       });
-      print('Progress loaded: $mastered questions mastered');
+      print(
+        '📊 Progress loaded: $mastered questions mastered in ${_loadTime}ms',
+      );
     } catch (e) {
       // Fallback: try to get local progress if Firestore is unavailable
       setState(() {
         mastered = 0;
         loading = false;
         progressError = 'Could not load cloud progress. Working offline.';
+        _loadTime = stopwatch.elapsedMilliseconds;
       });
       print('Progress loading error: $e');
+    }
+  }
+
+  // Preload images for better performance
+  Future<void> _preloadImages() async {
+    try {
+      await OptimizedImageService.preloadQuestionImages(widget.questions);
+      print('🖼️ Images preloaded for ${widget.questions.length} questions');
+    } catch (e) {
+      print('Error preloading images: $e');
     }
   }
 
@@ -1548,6 +1499,14 @@ class _ExamInfoScreenState extends State<ExamInfoScreen> {
                         color: theme.colorScheme.onSurfaceVariant,
                       ),
                     ),
+                    if (_loadTime > 0)
+                      Text(
+                        'Loaded in ${_loadTime}ms',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.primary,
+                          fontSize: 10,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -1691,358 +1650,18 @@ class _ExamInfoScreenState extends State<ExamInfoScreen> {
   }
 
   Widget _buildQuestionCard(Map<String, dynamic> q, int globalIdx) {
-    final show = showAnswer[globalIdx];
-    final theme = Theme.of(context);
-
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      elevation: 2,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Q${globalIdx + 1}. ${q['text']}',
-              style: theme.textTheme.titleMedium,
-            ),
-            // Show question images if present
-            if (q['question_images'] != null &&
-                q['question_images'] is List &&
-                q['question_images'].isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 8.0, bottom: 4.0),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    ...(q['question_images'] as List)
-                        .whereType<String>()
-                        .map((img) => img.trim())
-                        .where((img) => img.isNotEmpty)
-                        .map(
-                          (img) => GestureDetector(
-                            onTap: () {
-                              showEnhancedImageViewer(
-                                context,
-                                img,
-                                title: 'Question Image',
-                              );
-                            },
-                            child: _buildImageWidget(img),
-                          ),
-                        ),
-                  ],
-                ),
-              ),
-            const SizedBox(height: 6),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                ...List.generate(q['options'].length, (idx) {
-                  final optionText = q['options'][idx];
-                  final match = RegExp(
-                    r'^()[\.|\)]',
-                    caseSensitive: false,
-                  ).firstMatch(optionText.trim());
-                  final optionLetter = match != null
-                      ? match.group(1)!.toUpperCase()
-                      : String.fromCharCode(65 + idx);
-                  final answersRaw = q['answers'] ?? q['answer'];
-                  // Convert answer indices to letters for comparison
-                  List<String> correctLetters = [];
-                  if (answersRaw is List && answersRaw.isNotEmpty) {
-                    // If the answers are numeric indices, convert to letters
-                    if (int.tryParse(answersRaw[0].toString()) != null) {
-                      correctLetters = answersRaw
-                          .map(
-                            (a) => String.fromCharCode(
-                              65 + int.tryParse(a.toString())!,
-                            ),
-                          )
-                          .toList();
-                    } else {
-                      correctLetters = answersRaw
-                          .map((a) => a.toString().trim().toUpperCase())
-                          .toList();
-                    }
-                  } else if (answersRaw is String && answersRaw.isNotEmpty) {
-                    if (int.tryParse(answersRaw) != null) {
-                      correctLetters = [
-                        String.fromCharCode(65 + int.tryParse(answersRaw)!),
-                      ];
-                    } else {
-                      correctLetters = [answersRaw.trim().toUpperCase()];
-                    }
-                  }
-                  final isCorrect = correctLetters.contains(optionLetter);
-                  return Row(
-                    children: [
-                      if (show && isCorrect)
-                        Icon(Icons.check_circle, color: Colors.green, size: 20),
-                      Text(
-                        '$optionLetter. ',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: show && isCorrect ? Colors.green : null,
-                        ),
-                      ),
-                      Expanded(
-                        child: Text(
-                          optionText.replaceFirst(RegExp(r'^\w[\.|\)]\s*'), ''),
-                          style: TextStyle(
-                            color: show && isCorrect ? Colors.green : null,
-                            fontWeight: show && isCorrect
-                                ? FontWeight.bold
-                                : null,
-                          ),
-                        ),
-                      ),
-                    ],
-                  );
-                }),
-              ],
-            ),
-            // Show answer images only if showAnswer[globalIdx] is true
-            if (showAnswer[globalIdx] &&
-                q['answer_images'] != null &&
-                q['answer_images'] is List &&
-                q['answer_images'].isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 8.0, bottom: 4.0),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    ...(q['answer_images'] as List)
-                        .whereType<String>()
-                        .map((img) => img.trim())
-                        .where((img) => img.isNotEmpty)
-                        .map(
-                          (img) => GestureDetector(
-                            onTap: () {
-                              showEnhancedImageViewer(
-                                context,
-                                img,
-                                title: 'Answer Image',
-                              );
-                            },
-                            child: _buildImageWidget(img),
-                          ),
-                        ),
-                  ],
-                ),
-              ),
-
-            // AI Explanation Card
-            if (showAnswer[globalIdx])
-              Consumer<SettingsProvider>(
-                builder: (context, settings, child) {
-                  if (!settings.aiExplanationsEnabled) {
-                    return const SizedBox.shrink();
-                  }
-
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 12.0),
-                    child: Card(
-                      elevation: 2,
-                      child: Padding(
-                        padding: const EdgeInsets.all(12.0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                const Icon(
-                                  Icons.psychology,
-                                  color: Colors.purple,
-                                  size: 18,
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  'AI Explanation',
-                                  style: Theme.of(context).textTheme.titleSmall
-                                      ?.copyWith(
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.purple,
-                                      ),
-                                ),
-                                const Spacer(),
-                                if (_aiExplanations[globalIdx] == null &&
-                                    (_isLoadingExplanations[globalIdx] != true))
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.help_outline,
-                                      color: Colors.purple,
-                                      size: 18,
-                                    ),
-                                    onPressed: settings.isApiKeyConfigured
-                                        ? () => _showAIExplanation(
-                                            context,
-                                            q,
-                                            globalIdx,
-                                          )
-                                        : () => _showApiKeyDialog(context),
-                                    tooltip: 'Get AI Explanation',
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
-                                  ),
-                                if (_aiExplanations[globalIdx] != null)
-                                  Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if ((_regenerationAttempts[globalIdx] ??
-                                              0) <
-                                          _maxRegenerationAttempts)
-                                        IconButton(
-                                          icon: const Icon(
-                                            Icons.refresh,
-                                            color: Colors.purple,
-                                            size: 18,
-                                          ),
-                                          onPressed: settings.isApiKeyConfigured
-                                              ? () => _showAIExplanation(
-                                                  context,
-                                                  q,
-                                                  globalIdx,
-                                                )
-                                              : () =>
-                                                    _showApiKeyDialog(context),
-                                          tooltip:
-                                              'Refresh AI Explanation (${_maxRegenerationAttempts - (_regenerationAttempts[globalIdx] ?? 0)} attempts left)',
-                                          padding: EdgeInsets.zero,
-                                          constraints: const BoxConstraints(),
-                                        )
-                                      else
-                                        IconButton(
-                                          icon: const Icon(
-                                            Icons.refresh,
-                                            color: Colors.grey,
-                                            size: 18,
-                                          ),
-                                          onPressed: null,
-                                          tooltip:
-                                              'Maximum regeneration attempts reached',
-                                          padding: EdgeInsets.zero,
-                                          constraints: const BoxConstraints(),
-                                        ),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        '${_maxRegenerationAttempts - (_regenerationAttempts[globalIdx] ?? 0)}',
-                                        style: Theme.of(context)
-                                            .textTheme
-                                            .bodySmall
-                                            ?.copyWith(
-                                              color:
-                                                  (_regenerationAttempts[globalIdx] ??
-                                                          0) >=
-                                                      _maxRegenerationAttempts
-                                                  ? Colors.grey
-                                                  : Colors.purple,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                      ),
-                                    ],
-                                  ),
-                              ],
-                            ),
-                            const SizedBox(height: 6),
-                            if (_aiExplanations[globalIdx] == null &&
-                                (_isLoadingExplanations[globalIdx] != true))
-                              Text(
-                                'Get an AI-powered explanation of why this answer is correct and why the others are incorrect.',
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(color: Colors.grey[600]),
-                              ),
-                            if (_isLoadingExplanations[globalIdx] == true) ...[
-                              const SizedBox(height: 6),
-                              Row(
-                                children: [
-                                  const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      valueColor: AlwaysStoppedAnimation<Color>(
-                                        Colors.purple,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    'Generating AI explanation...',
-                                    style: Theme.of(context).textTheme.bodySmall
-                                        ?.copyWith(color: Colors.grey[600]),
-                                  ),
-                                ],
-                              ),
-                            ],
-                            if (_aiExplanations[globalIdx] != null) ...[
-                              const SizedBox(height: 8),
-                              Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: Colors.purple.withValues(alpha: 0.05),
-                                  borderRadius: BorderRadius.circular(6),
-                                  border: Border.all(
-                                    color: Colors.purple.withValues(alpha: 0.2),
-                                    width: 1,
-                                  ),
-                                ),
-                                child: _buildMarkdownText(
-                                  _aiExplanations[globalIdx]!,
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: TextButton.icon(
-                    icon: Icon(
-                      showAnswer[globalIdx]
-                          ? Icons.visibility_off
-                          : Icons.visibility,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                    label: Text(
-                      showAnswer[globalIdx] ? 'Hide Answer' : 'Show Answer',
-                    ),
-                    onPressed: () => setState(
-                      () => showAnswer[globalIdx] = !showAnswer[globalIdx],
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(
-                    Icons.edit_rounded,
-                    color: theme.colorScheme.primary,
-                  ),
-                  onPressed: () => _editQuestion(globalIdx),
-                  tooltip: 'Edit Question',
-                ),
-                IconButton(
-                  icon: Icon(
-                    Icons.delete_rounded,
-                    color: theme.colorScheme.error,
-                  ),
-                  onPressed: () => _deleteQuestion(globalIdx),
-                  tooltip: 'Delete Question',
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
+    return OptimizedQuestionCard(
+      question: q,
+      globalIndex: globalIdx,
+      showAnswer: showAnswer[globalIdx],
+      searchQuery: searchQuery,
+      onToggleAnswer: () {
+        setState(() {
+          showAnswer[globalIdx] = !showAnswer[globalIdx];
+        });
+      },
+      onEdit: () => _editQuestion(globalIdx),
+      onDelete: () => _deleteQuestion(globalIdx),
     );
   }
 
@@ -2959,8 +2578,8 @@ class _FullScreenImageViewerState extends State<_FullScreenImageViewer> {
   late TransformationController _transformationController;
   TapDownDetails? _doubleTapDetails;
   double _scale = 1.0;
-  double _minScale = 1.0;
-  double _maxScale = 5.0;
+  final double _minScale = 1.0;
+  final double _maxScale = 5.0;
 
   @override
   void initState() {

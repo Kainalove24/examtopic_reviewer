@@ -7,11 +7,18 @@ from urllib.parse import urlparse, quote
 import mimetypes
 from datetime import datetime
 import logging
-import cloudinary
-import cloudinary.uploader
-import cloudinary.config
-import cloudinary.api
-import cloudinary.exceptions
+# Try to import Cloudinary (optional for local development)
+try:
+    import cloudinary
+    import cloudinary.uploader
+    import cloudinary.config
+    import cloudinary.api
+    import cloudinary.exceptions
+    CLOUDINARY_AVAILABLE = True
+except ImportError:
+    # Cloudinary not available - this is OK for local development
+    CLOUDINARY_AVAILABLE = False
+    cloudinary = None
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -26,24 +33,28 @@ ALLOWED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB limit
 
 # Configure Cloudinary
-try:
-    cloudinary.config(
-        cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
-        api_key=os.environ.get('CLOUDINARY_API_KEY'),
-        api_secret=os.environ.get('CLOUDINARY_API_SECRET')
-    )
-    CLOUDINARY_ENABLED = all([
-        os.environ.get('CLOUDINARY_CLOUD_NAME'),
-        os.environ.get('CLOUDINARY_API_KEY'),
-        os.environ.get('CLOUDINARY_API_SECRET')
-    ])
-    if CLOUDINARY_ENABLED:
-        logger.info("✅ Cloudinary configuration loaded successfully")
-    else:
-        logger.warning("⚠️ Cloudinary environment variables not found, using local storage")
-except Exception as e:
-    logger.error(f"❌ Failed to configure Cloudinary: {e}")
-    CLOUDINARY_ENABLED = False
+CLOUDINARY_ENABLED = False
+if CLOUDINARY_AVAILABLE:
+    try:
+        cloudinary.config(
+            cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
+            api_key=os.environ.get('CLOUDINARY_API_KEY'),
+            api_secret=os.environ.get('CLOUDINARY_API_SECRET')
+        )
+        CLOUDINARY_ENABLED = all([
+            os.environ.get('CLOUDINARY_CLOUD_NAME'),
+            os.environ.get('CLOUDINARY_API_KEY'),
+            os.environ.get('CLOUDINARY_API_SECRET')
+        ])
+        if CLOUDINARY_ENABLED:
+            logger.info("✅ Cloudinary configuration loaded successfully")
+        else:
+            logger.warning("⚠️ Cloudinary environment variables not found, using local storage")
+    except Exception as e:
+        logger.error(f"❌ Failed to configure Cloudinary: {e}")
+        CLOUDINARY_ENABLED = False
+else:
+    logger.warning("⚠️ Cloudinary library not available, using local storage only")
 
 # Create images directory if it doesn't exist (fallback)
 os.makedirs(IMAGES_DIR, exist_ok=True)

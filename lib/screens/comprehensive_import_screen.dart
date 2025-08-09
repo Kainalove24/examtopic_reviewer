@@ -6,14 +6,12 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:go_router/go_router.dart';
 import '../services/csv_import_service.dart';
-import '../services/admin_service.dart';
-import '../models/imported_exam.dart';
 import '../models/exam_question.dart';
-import '../data/imported_exam_storage.dart';
 import '../providers/exam_provider.dart';
 import '../providers/progress_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/data_management_service.dart';
+import '../services/user_exam_service.dart';
 import 'package:provider/provider.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -983,10 +981,15 @@ class _ComprehensiveImportScreenState extends State<ComprehensiveImportScreen> {
   }
 
   Future<void> _performCsvImport() async {
-    // Check for existing exam
-    final existingExams = await ImportedExamStorage.loadAll();
-    final existingExam = existingExams
-        .where((exam) => exam.title.toLowerCase() == _examName!.toLowerCase())
+    // Check for existing exam in user imports
+    final allUserExams = await UserExamService.getUserExams();
+    final existingExam = allUserExams
+        .where(
+          (exam) =>
+              exam['type'] == 'user_imported' &&
+              exam['title'].toString().toLowerCase() ==
+                  _examName!.toLowerCase(),
+        )
         .firstOrNull;
 
     if (existingExam != null && !_overwriteExisting) {
@@ -1000,29 +1003,32 @@ class _ComprehensiveImportScreenState extends State<ComprehensiveImportScreen> {
       await _copyImagesToAppDirectory();
     }
 
-    // Create exam object
-    final exam = ImportedExam(
-      id: existingExam?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
-      title: _examName!,
-      filename: _csvFileName!,
-      importedAt: DateTime.now(),
-    );
-
-    // Save exam
-    if (_overwriteExisting && existingExam != null) {
-      await ImportedExamStorage.removeExam(existingExam.id);
-      await ImportedExamStorage.addExam(exam);
-    } else {
-      await ImportedExamStorage.addExam(exam);
-    }
-
     // Convert ExamQuestion objects to ExamEntry format
     final examQuestions = _parsedQuestions.cast<ExamQuestion>();
 
+    // Create exam data for user import
+    final examData = {
+      'id':
+          existingExam?['id'] ??
+          DateTime.now().millisecondsSinceEpoch.toString(),
+      'title': _examName!,
+      'questions': examQuestions.map((q) => q.toMap()).toList(),
+      'questionCount': _parsedQuestions.length,
+      'category': 'User Import',
+      'importDate': DateTime.now().toIso8601String(),
+    };
+
+    // Save to UserExamService (user imported exams are always unlocked)
+    if (_overwriteExisting && existingExam != null) {
+      await UserExamService.removeUserImportedExam(existingExam['id']);
+    }
+
+    await UserExamService.addUserImportedExam(examData);
+
     // Create ExamEntry and add to ExamProvider
     final examEntry = ExamEntry(
-      id: exam.id,
-      title: exam.title,
+      id: examData['id'],
+      title: examData['title'],
       questions: examQuestions,
     );
 

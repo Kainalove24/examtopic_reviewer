@@ -16,9 +16,9 @@ import 'screens/quiz_mode_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/stats_screen.dart';
 import 'screens/mistake_review_screen.dart';
-import 'screens/csv_import_debug_screen.dart';
 import 'screens/enhanced_csv_import_screen.dart';
 import 'screens/comprehensive_import_screen.dart';
+import 'screens/enhanced_scraper_integration_screen.dart';
 import 'data/theme_storage.dart';
 import 'package:go_router/go_router.dart';
 import 'screens/random_quiz_screen.dart';
@@ -289,10 +289,6 @@ class _MyAppState extends State<MyApp> {
         },
       ),
       GoRoute(
-        path: '/csv-import-debug',
-        builder: (context, state) => const CsvImportDebugScreen(),
-      ),
-      GoRoute(
         path: '/enhanced-csv-import',
         builder: (context, state) => const EnhancedCsvImportScreen(),
       ),
@@ -302,6 +298,10 @@ class _MyAppState extends State<MyApp> {
       ),
       // Admin Portal Routes
       GoRoute(path: '/admin', builder: (context, state) => AdminPortalScreen()),
+      GoRoute(
+        path: '/enhanced-scraper',
+        builder: (context, state) => const EnhancedScraperIntegrationScreen(),
+      ),
       GoRoute(
         path: '/voucher-entry',
         builder: (context, state) => VoucherEntryScreen(),

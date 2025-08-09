@@ -7,13 +7,15 @@ import '../providers/settings_provider.dart';
 import '../services/ai_service.dart';
 import '../widgets/ai_explanation_card.dart';
 import '../widgets/enhanced_image_viewer.dart';
-import '../services/image_service.dart';
+
 import 'dart:math';
 import 'dart:convert';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
-import 'package:flutter/foundation.dart' show kIsWeb;
+
+import '../services/optimized_image_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class RandomQuizScreen extends StatefulWidget {
   final String examTitle;
@@ -43,30 +45,44 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
   List<int> hotspotSelectedOrder = [];
   bool submitted = false;
   bool isCorrect = false;
-  bool showRepeatPrompt = false;
+  bool showMasteryPrompt = false;
+  bool showCorrectAnswerPrompt = false; // New state for showing correct answer
+  bool isCorrectAnswerPrompt =
+      false; // Track if prompt is for correct answer in queue phase
+  String? _aiExplanation;
+  bool _isLoadingExplanation = false;
+  int _regenerationAttempts = 0;
+  static const int _maxRegenerationAttempts = 2;
 
-  // New queue management system
-  List<Map<String, dynamic>> queue = [];
-  Map<String, int> questionRepeatCount =
-      {}; // Tracks how many times each question has been repeated
+  // Simplified Question Management System
+  List<Map<String, dynamic>> questionList = []; // Initial questions from range
+  List<Map<String, dynamic>> queueList =
+      []; // Questions that need 3 correct answers
   Set<String> masteredQuestions = {}; // Questions marked as mastered
   Set<String> mistakeQuestions = {}; // Questions in mistake list
-  Set<String> correctlyAnsweredQuestions =
-      {}; // Questions answered correctly at least once
-  Map<String, int> masteryAttempts =
-      {}; // Tracks correct answers per question (threshold: 3)
-  int totalQuestionsToProcess =
-      0; // Total questions that will be processed in this session
-  int processedQuestions = 0; // Questions that have been processed
+
+  // Streak tracking for Queue List questions
+  Map<String, int> questionStreaks =
+      {}; // Tracks consecutive correct answers per question
+
+  // Session state
+  bool isInQueuePhase = false; // Whether we're currently in Queue List phase
+  int totalQuestionsToProcess = 0;
+  int processedQuestions = 0;
+
+  // Session persistence
+  bool _isSessionLoaded = false;
+  static const String _sessionKey = 'random_quiz_session';
 
   // Progress tracking
   late ProgressProvider progressProvider;
 
-  // Session persistence
-  bool _hasActiveSession = false;
-  Map<String, dynamic>? _savedSessionData;
-
-  List<Map<String, dynamic>> get quizQuestions => queue;
+  List<Map<String, dynamic>> get currentQuestions =>
+      isInQueuePhase ? queueList : questionList;
+  Map<String, dynamic>? get currentQuestion =>
+      currentIndex < currentQuestions.length
+      ? currentQuestions[currentIndex]
+      : null;
 
   List<Widget> _buildImageWidgets(List images, BuildContext context) {
     final List<Widget> widgets = [];
@@ -164,34 +180,50 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.network(
-          imageData,
-          height: 120,
-          fit: BoxFit.contain,
-          // Use ImageService for better mobile web compatibility
-          headers: ImageService.getWebHeaders(),
-          loadingBuilder: (context, child, loadingProgress) {
-            if (loadingProgress == null) return child;
-            return Container(
-              height: 120,
-              color: Colors.grey.shade100,
-              child: Center(
-                child: CircularProgressIndicator(
-                  value: loadingProgress.expectedTotalBytes != null
-                      ? loadingProgress.cumulativeBytesLoaded /
-                            loadingProgress.expectedTotalBytes!
-                      : null,
-                ),
-              ),
-            );
-          },
-          errorBuilder: (context, error, stackTrace) {
-            print('Error loading network image: $error');
-            // For web, try alternative loading methods
-            if (kIsWeb) {
-              return _buildWebFallbackImage(imageData);
+        child: FutureBuilder<String?>(
+          future: OptimizedImageService.loadImage(imageData),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return Container(
+                height: 120,
+                color: Colors.grey.shade100,
+                child: const Center(child: CircularProgressIndicator()),
+              );
             }
-            return _buildErrorImage();
+
+            if (snapshot.hasError) {
+              print(
+                'Error loading image through OptimizedImageService: ${snapshot.error}',
+              );
+              return _buildErrorImage();
+            }
+
+            final processedUrl = snapshot.data ?? imageData;
+
+            return Image.network(
+              processedUrl,
+              height: 120,
+              fit: BoxFit.contain,
+              loadingBuilder: (context, child, loadingProgress) {
+                if (loadingProgress == null) return child;
+                return Container(
+                  height: 120,
+                  color: Colors.grey.shade100,
+                  child: Center(
+                    child: CircularProgressIndicator(
+                      value: loadingProgress.expectedTotalBytes != null
+                          ? loadingProgress.cumulativeBytesLoaded /
+                                loadingProgress.expectedTotalBytes!
+                          : null,
+                    ),
+                  ),
+                );
+              },
+              errorBuilder: (context, error, stackTrace) {
+                print('Error loading network image: $error');
+                return _buildErrorImage();
+              },
+            );
           },
         ),
       ),
@@ -235,131 +267,6 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
           );
         }
       },
-    );
-  }
-
-  Widget _buildWebFallbackImage(String imageData) {
-    // For web, try loading with different approaches
-    return FutureBuilder<Widget>(
-      future: _tryAlternativeImageLoading(imageData),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return Container(
-            height: 120,
-            decoration: BoxDecoration(
-              color: Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Center(child: CircularProgressIndicator()),
-          );
-        }
-        
-        if (snapshot.hasData) {
-          return snapshot.data!;
-        }
-        
-        return _buildMobileWebPlaceholder();
-      },
-    );
-  }
-
-  Future<Widget> _tryAlternativeImageLoading(String imageData) async {
-    // Try different approaches for mobile web
-    try {
-      // Approach 1: Try converting to base64
-      final base64Image = await ImageService.convertImageToBase64(imageData);
-      if (base64Image != null) {
-        return Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey.shade300),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.memory(
-              base64Decode(base64Image.split(',')[1]),
-              height: 120,
-              fit: BoxFit.contain,
-              errorBuilder: (context, error, stackTrace) {
-                throw Exception('Failed to load base64 image');
-              },
-            ),
-          ),
-        );
-      }
-    } catch (e) {
-      print('Failed to convert image to base64: $e');
-    }
-
-    // Approach 2: Try with different headers
-    try {
-      return Container(
-        decoration: BoxDecoration(
-          border: Border.all(color: Colors.grey.shade300),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Image.network(
-            imageData,
-            height: 120,
-            fit: BoxFit.contain,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            },
-            errorBuilder: (context, error, stackTrace) {
-              throw Exception('Failed with custom headers');
-            },
-          ),
-        ),
-      );
-    } catch (e) {
-      // Approach 3: Try without any headers
-      try {
-        return Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey.shade300),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Image.network(
-              imageData,
-              height: 120,
-              fit: BoxFit.contain,
-              errorBuilder: (context, error, stackTrace) {
-                throw Exception('Failed without headers');
-              },
-            ),
-          ),
-        );
-      } catch (e) {
-        // Approach 4: Show a placeholder
-        return _buildMobileWebPlaceholder();
-      }
-    }
-  }
-
-  Widget _buildMobileWebPlaceholder() {
-    return Container(
-      height: 120,
-      decoration: BoxDecoration(
-        color: Colors.grey[200],
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey[300]!),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.image_not_supported, size: 24, color: Colors.grey[600]),
-          SizedBox(height: 4),
-          Text(
-            'Image not available',
-            style: TextStyle(fontSize: 10, color: Colors.grey[600]),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
     );
   }
 
@@ -410,7 +317,10 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
           children: [
             Icon(Icons.broken_image, color: Colors.red, size: 24),
             SizedBox(height: 4),
-            Text('Image not found', style: TextStyle(fontSize: 10, color: Colors.red)),
+            Text(
+              'Image not found',
+              style: TextStyle(fontSize: 10, color: Colors.red),
+            ),
           ],
         ),
       ),
@@ -431,14 +341,15 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     progressProvider = Provider.of<ProgressProvider>(context, listen: false);
-    _loadSessionData();
+    // Check for existing session and let user choose
+    _checkForExistingSession();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    // Save session data when leaving the screen
-    _saveSessionData();
+    // Save session when disposing
+    _saveSession();
     super.dispose();
   }
 
@@ -447,18 +358,124 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
     super.didChangeAppLifecycleState(state);
     if (state == AppLifecycleState.paused) {
       // Save session data when app is paused
-      _saveSessionData();
+      _saveSession();
+    }
+  }
+
+  // Save current session state
+  Future<void> _saveSession() async {
+    try {
+      final sessionData = {
+        'examId': widget.examId,
+        'start': widget.start,
+        'end': widget.end,
+        'questionList': questionList,
+        'queueList': queueList,
+        'masteredQuestions': masteredQuestions.toList(),
+        'mistakeQuestions': mistakeQuestions.toList(),
+        'questionStreaks': questionStreaks,
+        'isInQueuePhase': isInQueuePhase,
+        'currentIndex': currentIndex,
+        'totalQuestionsToProcess': totalQuestionsToProcess,
+        'processedQuestions': processedQuestions,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      };
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_sessionKey, jsonEncode(sessionData));
+      print('Debug: Session saved successfully');
+    } catch (e) {
+      print('Debug: Error saving session: $e');
+    }
+  }
+
+  // Load existing session state
+  Future<void> _loadSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final sessionString = prefs.getString(_sessionKey);
+
+      if (sessionString != null) {
+        final sessionData = jsonDecode(sessionString) as Map<String, dynamic>;
+
+        // Check if this session is for the same exam and range
+        if (sessionData['examId'] == widget.examId &&
+            sessionData['start'] == widget.start &&
+            sessionData['end'] == widget.end) {
+          // Check if session is not too old (72 hours)
+          final timestamp = sessionData['timestamp'] as int;
+          final sessionTime = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          final now = DateTime.now();
+          final difference = now.difference(sessionTime);
+
+          if (difference.inHours < 72) {
+            // Load session data
+            setState(() {
+              questionList = List<Map<String, dynamic>>.from(
+                sessionData['questionList'] ?? [],
+              );
+              queueList = List<Map<String, dynamic>>.from(
+                sessionData['queueList'] ?? [],
+              );
+              masteredQuestions = Set<String>.from(
+                sessionData['masteredQuestions'] ?? [],
+              );
+              mistakeQuestions = Set<String>.from(
+                sessionData['mistakeQuestions'] ?? [],
+              );
+              questionStreaks = Map<String, int>.from(
+                sessionData['questionStreaks'] ?? {},
+              );
+              isInQueuePhase = sessionData['isInQueuePhase'] ?? false;
+              currentIndex = sessionData['currentIndex'] ?? 0;
+              totalQuestionsToProcess =
+                  sessionData['totalQuestionsToProcess'] ?? 0;
+              processedQuestions = sessionData['processedQuestions'] ?? 0;
+              _isSessionLoaded = true;
+            });
+
+            print('Debug: Session loaded successfully');
+            print('Debug: Question List: ${questionList.length} questions');
+            print('Debug: Queue List: ${queueList.length} questions');
+            print(
+              'Debug: Current phase: ${isInQueuePhase ? "Queue List" : "Question List"}',
+            );
+            print('Debug: Current index: $currentIndex');
+            return;
+          } else {
+            print(
+              'Debug: Session expired (older than 72 hours), starting fresh',
+            );
+          }
+        } else {
+          print('Debug: Session is for different exam/range, starting fresh');
+        }
+      }
+
+      // No valid session found, start fresh
+      _initializeQueue();
+    } catch (e) {
+      print('Debug: Error loading session: $e');
+      // Start fresh if loading fails
+      _initializeQueue();
+    }
+  }
+
+  // Clear session data
+  Future<void> _clearSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_sessionKey);
+      print('Debug: Session cleared');
+    } catch (e) {
+      print('Debug: Error clearing session: $e');
     }
   }
 
   Future<void> _initializeQueue() async {
-    // Reset all answer states first
-    _resetAnswerStates();
-
-    // Reset quiz state for new range
-    currentIndex = 0;
-    processedQuestions = 0;
-    questionRepeatCount.clear(); // Reset repeat counts for new range
+    print(
+      'Debug: Initializing session for range ${widget.start}-${widget.end}',
+    );
 
     // Load existing progress
     await progressProvider.loadProgress(widget.examId);
@@ -469,20 +486,20 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
         (progress['masteredQuestions'] as List?)?.cast<String>() ?? [];
     final mistakesList =
         (progress['mistakeQuestions'] as List?)?.cast<String>() ?? [];
-    final correctlyAnsweredList =
-        (progress['correctlyAnsweredQuestions'] as List?)?.cast<String>() ?? [];
-    final masteryAttemptsData =
-        (progress['masteryAttempts'] as Map<String, dynamic>?)?.map(
-          (key, value) => MapEntry(key, value as int),
-        ) ??
-        {};
+
+    print(
+      'Debug: Loading progress - Mistake questions from provider: ${mistakesList.length}',
+    );
+    print('Debug: Loading progress - Mistake questions: $mistakesList');
 
     setState(() {
       masteredQuestions = masteredList.toSet();
       mistakeQuestions = mistakesList.toSet();
-      correctlyAnsweredQuestions = correctlyAnsweredList.toSet();
-      masteryAttempts = masteryAttemptsData;
     });
+
+    print(
+      'Debug: Progress loaded - Mistake questions in state: ${mistakeQuestions.length}',
+    );
 
     // Get initial questions from the selected range
     final initialQuestions = widget.questions.sublist(
@@ -490,128 +507,119 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
       widget.end,
     );
 
-    // Filter out already mastered questions, but include mistake questions
-    // BUT only include mistake questions that are within the selected range
-    final questionsToStudy = initialQuestions.where((q) {
+    // Filter questions to include in Question List:
+    // 1. Questions that are NOT mastered
+    // 2. Questions within the selected range
+    final questionsToInclude = initialQuestions.where((q) {
       final questionId = _getQuestionId(q);
-      return !masteredQuestions.contains(questionId);
+
+      // Exclude mastered questions
+      if (masteredQuestions.contains(questionId)) {
+        print('Debug: Excluding question $questionId - already mastered');
+        return false;
+      }
+
+      // Include all non-mastered questions from the range
+      print(
+        'Debug: Including question $questionId - in range and not mastered',
+      );
+      return true;
     }).toList();
 
-    // Add mistake questions ONLY from the selected range (not entire exam)
-    final mistakeQuestionsToAdd = initialQuestions.where((q) {
-      final questionId = _getQuestionId(q);
-      return mistakeQuestions.contains(questionId);
-    }).toList();
+    // Check if all questions in the range are mastered
+    if (questionsToInclude.isEmpty) {
+      print(
+        'Debug: All questions in range ${widget.start}-${widget.end} are mastered',
+      );
+      setState(() {
+        questionList = [];
+        queueList = [];
+        totalQuestionsToProcess = 0;
+      });
+      return;
+    }
 
-    // Combine questions to study with mistake questions
-    final combinedQuestions = [...questionsToStudy, ...mistakeQuestionsToAdd];
-
-    // Shuffle the questions
+    // Shuffle the questions for Question List
     final random = Random();
-    combinedQuestions.shuffle(random);
+    questionsToInclude.shuffle(random);
 
     setState(() {
-      queue = combinedQuestions;
-      totalQuestionsToProcess = combinedQuestions.length; // Initialize total
-      // Initialize repeat count for new questions
-      for (final q in combinedQuestions) {
+      questionList = questionsToInclude;
+      queueList = []; // Start with empty Queue List
+      totalQuestionsToProcess = questionsToInclude.length;
+      isInQueuePhase = false; // Start in Question List phase
+      currentIndex = 0;
+
+      // Initialize streaks for questions
+      for (final q in questionsToInclude) {
         final questionId = _getQuestionId(q);
-        if (!questionRepeatCount.containsKey(questionId)) {
-          questionRepeatCount[questionId] = 0;
-        }
+        questionStreaks[questionId] = 0;
       }
     });
+
+    // Reset answer states to ensure clean start
+    _resetAnswerStates();
+    print('Debug: Answer states reset after session initialization');
+
+    print(
+      'Debug: Session initialized with ${questionsToInclude.length} questions in Question List',
+    );
+    print('Debug: Questions in range: ${initialQuestions.length}');
+    print(
+      'Debug: Mastered questions in range: ${initialQuestions.where((q) => masteredQuestions.contains(_getQuestionId(q))).length}',
+    );
   }
 
   String _getQuestionId(Map<String, dynamic> question) {
     // Create a unique ID for the question based on its content using hash codes
     final textHash = question['text']?.hashCode ?? 0;
     final optionsHash = question['options']?.hashCode ?? 0;
-    return '${textHash}_${optionsHash}';
-  }
-
-  int _getOriginalQuestionNumber(Map<String, dynamic> question) {
-    // Find the original index of this question in the full questions list
-    final originalIndex = widget.questions.indexWhere(
-      (q) => _getQuestionId(q) == _getQuestionId(question),
-    );
-    return originalIndex + 1; // Convert to 1-based numbering
+    return '${textHash}_$optionsHash';
   }
 
   void _addToMistakes(String questionId) {
-    setState(() {
-      mistakeQuestions.add(questionId);
-    });
-    // Save to progress
+    // Only add if not already in mistakes list (avoid duplicates)
+    if (!mistakeQuestions.contains(questionId)) {
+      setState(() {
+        mistakeQuestions.add(questionId);
+      });
+      print('Debug: Question $questionId added to mistakes list');
+    } else {
+      print(
+        'Debug: Question $questionId already in mistakes list (no duplicate)',
+      );
+    }
+    print('Debug: Total mistakes: ${mistakeQuestions.length}');
+
+    // Save to progress immediately
     _saveProgress();
   }
 
-  void _reinsertQuestionRandomly(Map<String, dynamic> question) {
+  void _addToQueueList(Map<String, dynamic> question) {
     final questionId = _getQuestionId(question);
-    final currentAttempts = masteryAttempts[questionId] ?? 0;
 
-    // Only reinsert if mastery threshold (3 correct answers) hasn't been reached
-    if (currentAttempts < 3) {
-      // Reinsert randomly in the queue, but ensure it's far from current position
-      final random = Random();
+    // Check if question is already in Queue List
+    final existingIndex = queueList.indexWhere(
+      (q) => _getQuestionId(q) == questionId,
+    );
 
-      // Calculate a minimum distance from current position (at least 3 questions away)
-      final minDistance = 3;
-      final currentPos = currentIndex;
-      final queueLength = queue.length;
-
-      // Find a suitable insertion point that's far from current position
-      int insertIndex;
-      int attempts = 0;
-      const maxAttempts = 10;
-
-      do {
-        insertIndex = random.nextInt(queueLength + 1);
-        attempts++;
-
-        // If we can't find a good position after max attempts, just insert at the end
-        if (attempts >= maxAttempts) {
-          insertIndex = queueLength;
-          break;
-        }
-      } while ((insertIndex - currentPos).abs() < minDistance &&
-          attempts < maxAttempts);
-
-      // Create a deep copy of the question to avoid reference issues
-      final questionCopy = Map<String, dynamic>.from(question);
-
-      // Ensure the question type and structure are preserved
-      if (questionCopy['type'] == null) {
-        questionCopy['type'] = 'mcq'; // Default type
-      }
-
-      // Ensure options are properly copied
-      if (questionCopy['options'] != null) {
-        questionCopy['options'] = List.from(questionCopy['options']);
-      }
-
-      // Ensure answers are properly copied
-      if (questionCopy['answers'] != null) {
-        if (questionCopy['answers'] is List) {
-          questionCopy['answers'] = List.from(questionCopy['answers']);
-        }
-      }
-
+    if (existingIndex == -1) {
+      // Add to Queue List if not already there
       setState(() {
-        queue.insert(insertIndex, questionCopy);
-        // Update total questions to process (add one more for this repeat)
-        totalQuestionsToProcess++;
+        queueList.add(question);
+        // Shuffle the Queue List after adding to ensure randomization
+        final random = Random();
+        queueList.shuffle(random);
       });
-
-      print(
-        'Debug: Question reinserted at position $insertIndex. Queue length: ${queue.length}',
-      );
-      print('Debug: Reinserted question type: ${questionCopy['type']}');
-      print('Debug: Reinserted question options: ${questionCopy['options']}');
-      print('Debug: Reinserted question answers: ${questionCopy['answers']}');
-      print('Debug: Current mastery attempts for question: $currentAttempts');
+      print('Debug: Question $questionId added to Queue List and shuffled');
+    } else {
+      print('Debug: Question $questionId already in Queue List');
     }
-    // If mastery threshold reached (3 correct answers), don't reinsert
+
+    // Initialize streak if not exists
+    if (!questionStreaks.containsKey(questionId)) {
+      questionStreaks[questionId] = 0;
+    }
   }
 
   void _markAsMastered(String questionId) {
@@ -623,524 +631,36 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
     _saveProgress();
   }
 
+  void _removeFromQueue(String questionId) {
+    // Remove from queue list when mastered in Queue List phase
+    setState(() {
+      final initialLength = queueList.length;
+      queueList.removeWhere((q) => _getQuestionId(q) == questionId);
+      questionStreaks.remove(questionId);
+      print(
+        'Debug: Queue List - removed question $questionId, queue length: ${queueList.length} (was $initialLength)',
+      );
+    });
+    print(
+      'Debug: Question $questionId removed from Queue List after 3 correct answers',
+    );
+  }
+
   Future<void> _saveProgress() async {
+    print(
+      'Debug: Saving progress - Mistake questions to save: ${mistakeQuestions.length}',
+    );
+    print('Debug: Saving progress - Mistake questions: $mistakeQuestions');
+
     progressProvider.updateProgress(
       examId: widget.examId,
       masteredQuestions: masteredQuestions.toList(),
       mistakeQuestions: mistakeQuestions.toList(),
-      correctlyAnsweredQuestions: correctlyAnsweredQuestions.toList(),
-      masteryAttempts: masteryAttempts,
     );
     await progressProvider.saveProgress(widget.examId);
+
+    print('Debug: Progress saved successfully');
   }
-
-  Future<void> _saveSessionData() async {
-    if (queue.isNotEmpty) {
-      final sessionData = {
-        'examId': widget.examId,
-        'examTitle': widget.examTitle,
-        'start': widget.start,
-        'end': widget.end,
-        'currentIndex': currentIndex,
-        'processedQuestions': processedQuestions,
-        'totalQuestionsToProcess': totalQuestionsToProcess,
-        'queue': queue,
-        'masteryAttempts': masteryAttempts,
-        'correctlyAnsweredQuestions': correctlyAnsweredQuestions.toList(),
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-      };
-
-      progressProvider.updateProgress(
-        examId: widget.examId,
-        lastSession: sessionData,
-      );
-      await progressProvider.saveProgress(widget.examId);
-
-      setState(() {
-        _hasActiveSession = true;
-        _savedSessionData = sessionData;
-      });
-
-      print('Debug: Session data saved');
-    }
-  }
-
-  Future<void> _loadSessionData() async {
-    final progress = progressProvider.progress;
-    final lastSession = progress['lastSession'] as Map<String, dynamic>?;
-
-    if (lastSession != null && lastSession['examId'] == widget.examId) {
-      // Check if session is from today (within 72 hours)
-      final sessionTimestamp = lastSession['timestamp'] as int? ?? 0;
-      final sessionTime = DateTime.fromMillisecondsSinceEpoch(sessionTimestamp);
-      final now = DateTime.now();
-      final difference = now.difference(sessionTime);
-
-      if (difference.inHours < 72) {
-        // Show resume dialog
-        final shouldResume = await _showResumeDialog(lastSession);
-
-        if (shouldResume) {
-          setState(() {
-            currentIndex = lastSession['currentIndex'] ?? 0;
-            processedQuestions = lastSession['processedQuestions'] ?? 0;
-            totalQuestionsToProcess =
-                lastSession['totalQuestionsToProcess'] ?? 0;
-            queue = List<Map<String, dynamic>>.from(lastSession['queue'] ?? []);
-            masteryAttempts = Map<String, int>.from(
-              lastSession['masteryAttempts'] ?? {},
-            );
-            correctlyAnsweredQuestions = Set<String>.from(
-              lastSession['correctlyAnsweredQuestions'] ?? [],
-            );
-            _hasActiveSession = true;
-            _savedSessionData = lastSession;
-          });
-
-          print('Debug: Session resumed - ${queue.length} questions remaining');
-          return;
-        } else {
-          // User chose to start fresh, clear session data
-          await _clearSessionData();
-        }
-      }
-    }
-
-    // No valid session data or user chose to start fresh
-    await _initializeQueue();
-  }
-
-  Future<bool> _showResumeDialog(Map<String, dynamic> sessionData) async {
-    final theme = Theme.of(context);
-    final remainingQuestions = (sessionData['queue'] as List?)?.length ?? 0;
-    final processedQuestions = sessionData['processedQuestions'] ?? 0;
-    final totalQuestions = sessionData['totalQuestionsToProcess'] ?? 0;
-
-    return await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.secondaryContainer,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(
-                    Icons.restore_rounded,
-                    color: theme.colorScheme.onSecondaryContainer,
-                    size: 20,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  'Resume Session?',
-                  style: theme.textTheme.titleLarge?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'You have an unfinished study session:',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceContainerHighest
-                        .withOpacity(0.3),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Questions ${sessionData['start']}-${sessionData['end']}',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Remaining: $remainingQuestions questions',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                      Text(
-                        'Progress: $processedQuestions/$totalQuestions processed',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('Start Fresh'),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: theme.colorScheme.secondary,
-                  foregroundColor: theme.colorScheme.onSecondary,
-                ),
-                child: const Text('Resume'),
-              ),
-            ],
-          ),
-        ) ??
-        false;
-  }
-
-  Future<void> _saveAIExplanation(
-    Map<String, dynamic> question,
-    String explanation,
-  ) async {
-    try {
-      // Save to the question data
-      question['ai_explanation'] = explanation;
-
-      // Save to ExamProvider for persistence across screens
-      final examProvider = Provider.of<ExamProvider>(context, listen: false);
-      final originalQuestionIndex = widget.questions.indexOf(question);
-      if (originalQuestionIndex != -1) {
-        await examProvider.updateQuestionAIExplanation(
-          widget.examId,
-          originalQuestionIndex,
-          explanation,
-        );
-      }
-
-      print(
-        'AI explanation saved for question: ${question['text']?.substring(0, 50)}...',
-      );
-    } catch (e) {
-      print('Error saving AI explanation: $e');
-    }
-  }
-
-  void _submit() {
-    // Safety check: ensure we have questions and current index is valid
-    if (queue.isEmpty || currentIndex >= queue.length) {
-      print(
-        'Debug: Queue is empty or invalid currentIndex: $currentIndex, queue length: ${queue.length}',
-      );
-      return;
-    }
-
-    final q = queue[currentIndex];
-    final isHotspot = q['type'] == 'hotspot';
-    final isMulti = _isMultiAnswer(q);
-
-    // Additional safety check for hotspot questions
-    if (isHotspot && hotspotSelectedOrder.isEmpty) {
-      print('Debug: Hotspot question but no selection made');
-      return;
-    }
-
-    bool correct = false;
-
-    if (isHotspot) {
-      final correctIndices = _getCorrectIndices(q);
-      print('Debug RandomQuiz: Hotspot question');
-      print('Debug RandomQuiz: Question type: ${q['type']}');
-      print('Debug RandomQuiz: User answer: $hotspotSelectedOrder');
-      print('Debug RandomQuiz: Correct indices: $correctIndices');
-      print('Debug RandomQuiz: Options: ${q['options']}');
-      print('Debug RandomQuiz: Answers raw: ${q['answers']}');
-      print('Debug RandomQuiz: Question ID: ${_getQuestionId(q)}');
-      print(
-        'Debug RandomQuiz: Repeat count: ${questionRepeatCount[_getQuestionId(q)] ?? 0}',
-      );
-
-      // Check if user has made any selection
-      if (hotspotSelectedOrder.isEmpty) {
-        print('Debug RandomQuiz: No user selection made');
-        correct = false;
-      } else if (correctIndices.isEmpty) {
-        print('Debug RandomQuiz: No correct indices found');
-        correct = false;
-      } else {
-        // Compare the selected order with correct order
-        print(
-          'Debug RandomQuiz: Comparing lengths - User: ${hotspotSelectedOrder.length}, Correct: ${correctIndices.length}',
-        );
-        print('Debug RandomQuiz: User order: $hotspotSelectedOrder');
-        print('Debug RandomQuiz: Correct order: $correctIndices');
-
-        if (hotspotSelectedOrder.length == correctIndices.length) {
-          bool allMatch = true;
-          for (int i = 0; i < correctIndices.length; i++) {
-            if (hotspotSelectedOrder[i] != correctIndices[i]) {
-              print(
-                'Debug RandomQuiz: Mismatch at position $i - User: ${hotspotSelectedOrder[i]}, Correct: ${correctIndices[i]}',
-              );
-              allMatch = false;
-              break;
-            }
-          }
-          correct = allMatch;
-        } else {
-          print('Debug RandomQuiz: Length mismatch');
-          correct = false;
-        }
-      }
-
-      print('Debug RandomQuiz: Is correct: $correct');
-    } else if (isMulti) {
-      final options = q['options'] as List;
-      final answersRaw = q['answers'] ?? q['answer'];
-      List<int> correctIndices = [];
-      if (answersRaw is List && answersRaw.isNotEmpty) {
-        // Try to match by letter if possible
-        correctIndices = answersRaw.map((a) {
-          final aStr = a.toString().trim();
-          if (aStr.length == 1 &&
-              RegExp(r'^[A-Z]$', caseSensitive: false).hasMatch(aStr)) {
-            return aStr.toUpperCase().codeUnitAt(0) - 65;
-          }
-          // fallback to numeric or text match
-          if (int.tryParse(aStr) != null) {
-            return int.tryParse(aStr)!;
-          }
-          return options.indexWhere((o) => o.toString().trim() == aStr);
-        }).toList();
-      } else if (answersRaw is String && answersRaw.isNotEmpty) {
-        correctIndices = answersRaw.split('|').map((a) {
-          final aStr = a.trim();
-          if (aStr.length == 1 &&
-              RegExp(r'^[A-Z]$', caseSensitive: false).hasMatch(aStr)) {
-            return aStr.toUpperCase().codeUnitAt(0) - 65;
-          }
-          // fallback to numeric or text match
-          if (int.tryParse(aStr) != null) {
-            return int.tryParse(aStr)!;
-          }
-          return options.indexWhere((o) => o.toString().trim() == aStr);
-        }).toList();
-      }
-
-      final selectedSet = selectedOptions.toSet();
-      final correctSet = correctIndices.toSet();
-      correct =
-          selectedSet.length == correctSet.length &&
-          selectedSet.difference(correctSet).isEmpty;
-    } else {
-      if (selectedOption == null) return;
-      final options = q['options'] as List;
-      final answersRaw = q['answers'] ?? q['answer'];
-      List<int> correctIndices = [];
-      if (answersRaw is List && answersRaw.isNotEmpty) {
-        // Try to match by letter if possible
-        correctIndices = answersRaw.map((a) {
-          final aStr = a.toString().trim();
-          if (aStr.length == 1 &&
-              RegExp(r'^[A-Z]$', caseSensitive: false).hasMatch(aStr)) {
-            return aStr.toUpperCase().codeUnitAt(0) - 65;
-          }
-          // fallback to numeric or text match
-          if (int.tryParse(aStr) != null) {
-            return int.tryParse(aStr)!;
-          }
-          return options.indexWhere((o) => o.toString().trim() == aStr);
-        }).toList();
-      } else if (answersRaw is String && answersRaw.isNotEmpty) {
-        // Try to match by letter if possible
-        final aStr = answersRaw.trim();
-        if (aStr.length == 1 &&
-            RegExp(r'^[A-Z]$', caseSensitive: false).hasMatch(aStr)) {
-          correctIndices = [aStr.toUpperCase().codeUnitAt(0) - 65];
-        } else if (int.tryParse(aStr) != null) {
-          // fallback to numeric
-          correctIndices = [int.tryParse(aStr)!];
-        } else {
-          // fallback to text match
-          final idx = options.indexWhere((o) => o.toString().trim() == aStr);
-          if (idx >= 0) correctIndices = [idx];
-        }
-      }
-      correct = correctIndices.contains(selectedOption);
-    }
-
-    print(
-      'Debug: Submit - currentIndex: $currentIndex, queue length: ${queue.length}, correct: $correct',
-    );
-
-    setState(() {
-      submitted = true;
-      isCorrect = correct;
-      showRepeatPrompt = false;
-    });
-
-    final questionId = _getQuestionId(q);
-
-    if (correct) {
-      // Check if this question was previously answered incorrectly
-      final wasPreviouslyIncorrect = mistakeQuestions.contains(questionId);
-      final currentAttempts = masteryAttempts[questionId] ?? 0;
-      final newAttempts = currentAttempts + 1;
-
-      // Update mastery attempts
-      setState(() {
-        masteryAttempts[questionId] = newAttempts;
-        correctlyAnsweredQuestions.add(questionId);
-      });
-
-      if (wasPreviouslyIncorrect) {
-        // Previously incorrect, now correct - check if mastery threshold reached
-        if (newAttempts >= 3) {
-          // Mastery threshold reached - mark as mastered
-          _markAsMastered(questionId);
-          _next();
-        } else {
-          // Not yet mastered - show mastery options
-          setState(() {
-            showRepeatPrompt = true;
-          });
-        }
-      } else {
-        // First time answering this question correctly - check mastery threshold
-        if (newAttempts >= 3) {
-          // Mastery threshold reached - mark as mastered
-          _markAsMastered(questionId);
-          _next();
-        } else {
-          // Not yet mastered - show mastery options
-          setState(() {
-            showRepeatPrompt = true;
-          });
-        }
-      }
-    } else {
-      // Incorrect answer - add to mistakes and reinsert into queue
-      _addToMistakes(questionId);
-      _reinsertQuestionRandomly(q);
-
-      // Don't automatically move to next question for incorrect answers
-      // Let the user see the feedback and manually proceed
-      // The question will be reinserted into the queue for later review
-    }
-
-    // Increment processed questions count
-    setState(() {
-      processedQuestions++;
-    });
-  }
-
-  void _repeat(bool repeat) {
-    // Safety check: ensure we have questions and current index is valid
-    if (queue.isEmpty || currentIndex >= queue.length) {
-      print(
-        'Debug: Queue is empty or invalid currentIndex in _repeat: $currentIndex, queue length: ${queue.length}',
-      );
-      return;
-    }
-
-    final q = queue[currentIndex];
-    final questionId = _getQuestionId(q);
-
-    setState(() {
-      showRepeatPrompt = false;
-    });
-
-    // User chooses to review later - add to mistakes and reinsert
-    _addToMistakes(questionId);
-    _reinsertQuestionRandomly(q);
-    print('Debug: Question added to mistakes and reinserted for review');
-
-    // Don't automatically move to next question - let user manually click "Next Question"
-    // The button will be enabled now that showRepeatPrompt is false
-  }
-
-  void _resetAnswerStates() {
-    selectedOption = null;
-    selectedOptions.clear();
-    hotspotSelectedOrder.clear();
-    submitted = false;
-    isCorrect = false;
-    showRepeatPrompt = false;
-    _aiExplanation = null;
-    _isLoadingExplanation = false;
-    _regenerationAttempts = 0;
-  }
-
-  void _next() {
-    print(
-      'Debug: _next - before: currentIndex: $currentIndex, queue length: ${queue.length}',
-    );
-
-    setState(() {
-      // Remove the current question from the queue since it's been processed
-      if (currentIndex < queue.length) {
-        final removedQuestion = queue.removeAt(currentIndex);
-        print(
-          'Debug: _next - removed question: ${removedQuestion['text']?.substring(0, 50)}...',
-        );
-      }
-
-      // Check if we have more questions to process
-      if (queue.isNotEmpty) {
-        // Stay at the same index (which now points to the next question)
-        // Reset ALL answer states to prevent bleeding between questions
-        _resetAnswerStates();
-        print(
-          'Debug: _next - after: currentIndex: $currentIndex, queue length: ${queue.length}',
-        );
-        print(
-          'Debug: _next - next question: ${queue[currentIndex]['text']?.substring(0, 50)}...',
-        );
-      } else {
-        // No more questions in queue - session is complete
-        print('Debug: _next - queue empty, finishing session');
-        _finish();
-      }
-    });
-  }
-
-  void _finish() {
-    setState(() {
-      // Mark as finished
-      submitted = true;
-      showRepeatPrompt = false;
-    });
-
-    // Clear session data since session is complete
-    _clearSessionData();
-
-    // Save final progress
-    _saveProgress();
-  }
-
-  Future<void> _clearSessionData() async {
-    progressProvider.updateProgress(examId: widget.examId, lastSession: null);
-    await progressProvider.saveProgress(widget.examId);
-
-    setState(() {
-      _hasActiveSession = false;
-      _savedSessionData = null;
-    });
-
-    print('Debug: Session data cleared');
-  }
-
-  String? _aiExplanation;
-  bool _isLoadingExplanation = false;
-  int _regenerationAttempts = 0;
-  static const int _maxRegenerationAttempts = 2;
 
   void _showAIExplanation(
     BuildContext context,
@@ -1148,9 +668,9 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
     int questionIndex,
   ) async {
     // Safety check: ensure we have questions and current index is valid
-    if (queue.isEmpty || currentIndex >= queue.length) {
+    if (queueList.isEmpty || currentIndex >= queueList.length) {
       print(
-        'Debug: Queue is empty or invalid currentIndex in _showAIExplanation: $currentIndex, queue length: ${queue.length}',
+        'Debug: Queue is empty or invalid currentIndex in _showAIExplanation: $currentIndex, queue length: ${queueList.length}',
       );
       return;
     }
@@ -1301,7 +821,9 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
         content: Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.3),
+            color: theme.colorScheme.surfaceContainerHighest.withValues(
+              alpha: 0.3,
+            ),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Row(
@@ -1335,76 +857,6 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
         ],
       ),
     );
-  }
-
-  Widget _buildMarkdownText(String text) {
-    final List<TextSpan> spans = [];
-    // Updated regex to handle edge cases and ensure proper matching
-    final RegExp boldPattern = RegExp(
-      r'\*\*(.*?)\*\*',
-      multiLine: true,
-      dotAll: true,
-    );
-    int currentIndex = 0;
-
-    // Debug: Print the text to see what we're working with
-    print('Debug: Processing text: $text');
-    print(
-      'Debug: Bold pattern matches: ${boldPattern.allMatches(text).length}',
-    );
-
-    for (final Match match in boldPattern.allMatches(text)) {
-      print(
-        'Debug: Found bold match: "${match.group(0)}" -> "${match.group(1)}"',
-      );
-
-      // Add text before the bold part
-      if (match.start > currentIndex) {
-        spans.add(
-          TextSpan(
-            text: text.substring(currentIndex, match.start),
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(height: 1.5),
-          ),
-        );
-      }
-
-      // Add the bold text
-      spans.add(
-        TextSpan(
-          text: match.group(1),
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            height: 1.5,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-      );
-
-      currentIndex = match.end;
-    }
-
-    // Add remaining text
-    if (currentIndex < text.length) {
-      spans.add(
-        TextSpan(
-          text: text.substring(currentIndex),
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.5),
-        ),
-      );
-    }
-
-    // If no bold patterns found, return regular text
-    if (spans.isEmpty) {
-      print('Debug: No bold patterns found, returning regular text');
-      return Text(
-        text,
-        style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.5),
-      );
-    }
-
-    print('Debug: Returning RichText with ${spans.length} spans');
-    return RichText(text: TextSpan(children: spans));
   }
 
   void _startNew() {
@@ -1450,7 +902,7 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
                       color: theme.colorScheme.surfaceContainerHighest
-                          .withOpacity(0.3),
+                          .withValues(alpha: 0.3),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Row(
@@ -1703,10 +1155,18 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
     if (isHotspot) {
       final answersRaw = q['answers'] ?? q['answer'];
       List<String> correctOptions = [];
+      List<int> correctIndices = [];
 
       if (answersRaw is List) {
         // Handle list format (from exam data)
         correctOptions = answersRaw.map((a) => a.toString().trim()).toList();
+        // Find indices for sequence
+        for (var ans in correctOptions) {
+          final idx = options.indexWhere((o) => o.toString().trim() == ans);
+          if (idx >= 0) {
+            correctIndices.add(idx);
+          }
+        }
       } else {
         // Handle string format (fallback)
         final answerText = answersRaw?.toString() ?? '';
@@ -1721,19 +1181,27 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
             final idx = aStr.toUpperCase().codeUnitAt(0) - 65;
             if (idx >= 0 && idx < options.length) {
               correctOptions.add(options[idx].toString().trim());
+              correctIndices.add(idx);
             }
           } else if (int.tryParse(aStr) != null) {
             final idx = int.tryParse(aStr)!;
             if (idx >= 0 && idx < options.length) {
               correctOptions.add(options[idx].toString().trim());
+              correctIndices.add(idx);
             }
           } else {
             correctOptions.add(aStr);
+            final idx = options.indexWhere((o) => o.toString().trim() == aStr);
+            if (idx >= 0) {
+              correctIndices.add(idx);
+            }
           }
         }
       }
 
-      return correctOptions.join(', ');
+      // Create sequence string
+      final sequence = correctIndices.map((i) => i + 1).join(' → ');
+      return '$sequence: ${correctOptions.join(', ')}';
     } else if (isMulti) {
       final answersRaw = q['answers'] ?? q['answer'];
       List<String> correctLetters = [];
@@ -1788,27 +1256,27 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
 
   @override
   Widget build(BuildContext context) {
-    // Check if session is finished (submitted = true and queue is empty)
-    if (submitted && queue.isEmpty) {
+    // Check if session is finished (no more questions in either phase)
+    if (questionList.isEmpty && queueList.isEmpty) {
       return _buildSessionCompleteState();
     }
 
-    // Check if queue is empty (all questions in range are mastered)
-    if (queue.isEmpty) {
+    // Check if all questions in range are mastered
+    if (questionList.isEmpty && queueList.isEmpty) {
       return _buildEmptyState();
     }
 
     // Safety check: ensure we have questions and current index is valid
-    if (currentIndex >= queue.length) {
+    if (currentQuestion == null) {
       return _buildSessionCompleteState();
     }
 
-    final q = queue[currentIndex];
+    final q = currentQuestion!;
     final options = q['options'] as List;
     final isHotspot = q['type'] == 'hotspot';
     final isMulti = _isMultiAnswer(q);
-    int masteredCount = masteredQuestions.length;
-    final isLastQuestion = currentIndex == queue.length - 1;
+
+    final isLastQuestion = currentIndex == currentQuestions.length - 1;
 
     return Scaffold(
       appBar: AppBar(
@@ -1826,37 +1294,161 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
             ),
           ),
         ),
+        actions: [
+          // Session management button
+          PopupMenuButton<String>(
+            icon: Icon(
+              Icons.more_vert_rounded,
+              color: Theme.of(context).colorScheme.onSurface,
+            ),
+            onSelected: (value) {
+              switch (value) {
+                case 'save':
+                  _manualSaveSession();
+                  break;
+                case 'clear':
+                  _showClearSessionDialog();
+                  break;
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'save',
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.save_rounded,
+                      size: 20,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 12),
+                    const Text('Save Session'),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'clear',
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.clear_rounded,
+                      size: 20,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      'Clear Session',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
         elevation: 0,
         backgroundColor: Colors.transparent,
         centerTitle: true,
       ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(2),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _buildProgressSection(),
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
             _buildQuestionCard(q, options, isHotspot, isMulti),
-            const SizedBox(height: 24),
+            const SizedBox(height: 12),
             _buildActionButtons(isHotspot, isMulti, isLastQuestion),
             if (submitted) ...[
-              const SizedBox(height: 16),
-              if (showRepeatPrompt) ...[
-                _buildRepeatPrompt(),
-                const SizedBox(height: 16),
+              if (showMasteryPrompt) ...[
+                _buildMasteryPrompt(),
+                const SizedBox(height: 8),
+              ],
+              if (showCorrectAnswerPrompt) ...[
+                _buildCorrectAnswerPrompt(),
+                const SizedBox(height: 8),
               ],
               _buildAIExplanationSection(q),
               if (isHotspot &&
                   q['answer_images'] != null &&
                   q['answer_images'] is List &&
                   q['answer_images'].isNotEmpty) ...[
-                const SizedBox(height: 16),
+                const SizedBox(height: 8),
                 _buildAnswerImages(q['answer_images']),
               ],
             ],
           ],
         ),
+      ),
+    );
+  }
+
+  void _showClearSessionDialog() {
+    final theme = Theme.of(context);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.errorContainer,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(
+                Icons.warning_rounded,
+                color: theme.colorScheme.onErrorContainer,
+                size: 20,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              'Clear Session',
+              style: theme.textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          'This will clear your current session progress. You will need to start over from the beginning. This action cannot be undone.',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _clearSession();
+              _initializeQueue();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: const Text('Session cleared'),
+                  backgroundColor: theme.colorScheme.error,
+                  behavior: SnackBarBehavior.floating,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              );
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: theme.colorScheme.error,
+              foregroundColor: theme.colorScheme.onError,
+            ),
+            child: const Text('Clear Session'),
+          ),
+        ],
       ),
     );
   }
@@ -2034,6 +1626,20 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
                   ),
                   const SizedBox(width: 16),
                   ElevatedButton.icon(
+                    onPressed: _continueSession,
+                    icon: const Icon(Icons.play_arrow_rounded),
+                    label: const Text('Continue Session'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: theme.colorScheme.primary,
+                      foregroundColor: theme.colorScheme.onPrimary,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 12,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  ElevatedButton.icon(
                     onPressed: _startNew,
                     icon: const Icon(Icons.refresh_rounded),
                     label: const Text('Start New'),
@@ -2055,7 +1661,13 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
 
   Widget _buildProgressSection() {
     final theme = Theme.of(context);
-    final progress = queue.isNotEmpty ? (currentIndex + 1) / queue.length : 0.0;
+    final currentPhase = isInQueuePhase ? 'Queue List' : 'Question List';
+    final progress = currentQuestions.isNotEmpty
+        ? (currentIndex + 1) / currentQuestions.length
+        : 0.0;
+    final currentStreak = currentQuestion != null
+        ? questionStreaks[_getQuestionId(currentQuestion!)] ?? 0
+        : 0;
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -2064,7 +1676,7 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color: theme.colorScheme.shadow.withOpacity(0.1),
+            color: theme.colorScheme.shadow.withValues(alpha: 0.1),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
@@ -2100,7 +1712,7 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      'Question ${currentIndex + 1} of ${queue.length}',
+                      '$currentPhase - Question ${currentIndex + 1} of ${currentQuestions.length}',
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: theme.colorScheme.onSurfaceVariant,
                       ),
@@ -2134,41 +1746,52 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                'Total to process: $totalQuestionsToProcess',
+                'Question List: ${questionList.length}',
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
               ),
-              Text(
-                'Processed: $processedQuestions',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
+              if (isInQueuePhase) ...[
+                Text(
+                  'Streak: $currentStreak/3',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-              ),
+              ] else ...[
+                Text(
+                  'Queue List: ${queueList.length}',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ],
           ),
-          if (_hasActiveSession) ...[
+          // Session status indicator
+          if (_isSessionLoaded) ...[
             const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               decoration: BoxDecoration(
                 color: theme.colorScheme.secondaryContainer,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(4),
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
                     Icons.restore_rounded,
+                    size: 12,
                     color: theme.colorScheme.onSecondaryContainer,
-                    size: 14,
                   ),
                   const SizedBox(width: 4),
                   Text(
-                    'Resumed Session',
-                    style: theme.textTheme.bodySmall?.copyWith(
+                    'Session restored',
+                    style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.onSecondaryContainer,
-                      fontWeight: FontWeight.w600,
+                      fontWeight: FontWeight.w500,
                     ),
                   ),
                 ],
@@ -2187,7 +1810,6 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
     bool isMulti,
   ) {
     final theme = Theme.of(context);
-    final originalQuestionNumber = _getOriginalQuestionNumber(q);
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -2196,7 +1818,7 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color: theme.colorScheme.shadow.withOpacity(0.1),
+            color: theme.colorScheme.shadow.withValues(alpha: 0.1),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
@@ -2333,8 +1955,8 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
                   ),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       '${i + 1}. ${options[i]}',
@@ -2346,25 +1968,30 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
                             ? theme.colorScheme.onPrimaryContainer
                             : theme.colorScheme.onSurface,
                       ),
+                      textAlign: TextAlign.start,
                     ),
                     if (indices.isNotEmpty) ...[
-                      const SizedBox(width: 8),
-                      ...indices.map(
-                        (orderIdx) => Container(
-                          margin: const EdgeInsets.only(left: 2),
-                          padding: const EdgeInsets.all(4),
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.primary,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Text(
-                            (orderIdx + 1).toString(),
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onPrimary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 4,
+                        children: indices
+                            .map(
+                              (orderIdx) => Container(
+                                padding: const EdgeInsets.all(4),
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.primary,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Text(
+                                  (orderIdx + 1).toString(),
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.onPrimary,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            )
+                            .toList(),
                       ),
                     ],
                   ],
@@ -2411,7 +2038,9 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
         Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.3),
+            color: theme.colorScheme.surfaceContainerHighest.withValues(
+              alpha: 0.3,
+            ),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Row(
@@ -2427,48 +2056,14 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
                 style: theme.textTheme.bodyMedium?.copyWith(
                   fontWeight: FontWeight.w600,
                   color: submitted
-                      ? (isCorrect
-                            ? theme.colorScheme.primary
-                            : theme.colorScheme.error)
+                      ? (isCorrect ? Colors.green : theme.colorScheme.error)
                       : theme.colorScheme.onSurfaceVariant,
                 ),
               ),
             ],
           ),
         ),
-        if (submitted) ...[
-          const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: theme.colorScheme.primaryContainer.withOpacity(0.3),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                color: theme.colorScheme.primary.withOpacity(0.2),
-                width: 1,
-              ),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.check_circle_rounded,
-                  color: theme.colorScheme.primary,
-                  size: 16,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _getCorrectAnswerText(q),
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: theme.colorScheme.primary,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
+        if (submitted) ...[const SizedBox(height: 8)],
       ],
     );
   }
@@ -2664,12 +2259,10 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
               ),
             ),
           ),
-        if (submitted) ...[
+        if (submitted && !showMasteryPrompt && !showCorrectAnswerPrompt) ...[
           Expanded(
             child: ElevatedButton.icon(
-              onPressed: showRepeatPrompt
-                  ? null // Disable button when repeat prompt is shown
-                  : (isLastQuestion ? _finish : _next),
+              onPressed: (isLastQuestion ? _finish : _next),
               icon: Icon(
                 isLastQuestion
                     ? Icons.flag_rounded
@@ -2677,16 +2270,12 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
               ),
               label: Text(isLastQuestion ? 'Finish Session' : 'Next Question'),
               style: ElevatedButton.styleFrom(
-                backgroundColor: showRepeatPrompt
-                    ? theme.colorScheme.surfaceContainerHighest
-                    : (isLastQuestion
-                          ? theme.colorScheme.secondary
-                          : theme.colorScheme.primary),
-                foregroundColor: showRepeatPrompt
-                    ? theme.colorScheme.onSurfaceVariant
-                    : (isLastQuestion
-                          ? theme.colorScheme.onSecondary
-                          : theme.colorScheme.onPrimary),
+                backgroundColor: (isLastQuestion
+                    ? theme.colorScheme.secondary
+                    : theme.colorScheme.primary),
+                foregroundColor: (isLastQuestion
+                    ? theme.colorScheme.onSecondary
+                    : theme.colorScheme.onPrimary),
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -2720,208 +2309,779 @@ class _RandomQuizScreenState extends State<RandomQuizScreen>
     );
   }
 
-  Widget _buildAIExplanationControls(
-    Map<String, dynamic> q,
-    ThemeData theme,
-    SettingsProvider settings,
-  ) {
-    if (_aiExplanation == null && !_isLoadingExplanation) {
-      return IconButton(
-        icon: Icon(
-          Icons.help_outline_rounded,
-          color: theme.colorScheme.secondary,
-          size: 20,
-        ),
-        onPressed: settings.isApiKeyConfigured
-            ? () => _showAIExplanation(context, q, currentIndex)
-            : () => _showApiKeyDialog(context),
-        tooltip: 'Get AI Explanation',
-        style: IconButton.styleFrom(
-          backgroundColor: theme.colorScheme.secondaryContainer.withOpacity(
-            0.3,
-          ),
-          padding: const EdgeInsets.all(8),
-        ),
-      );
-    }
+  Widget _buildMasteryPrompt() {
+    final theme = Theme.of(context);
+    final q = currentQuestion;
+    if (q == null) return const SizedBox.shrink();
 
-    if (_aiExplanation != null) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
+    return AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      title: Row(
         children: [
-          if (_regenerationAttempts < _maxRegenerationAttempts)
-            IconButton(
-              icon: Icon(
-                Icons.refresh_rounded,
-                color: theme.colorScheme.secondary,
-                size: 20,
-              ),
-              onPressed: settings.isApiKeyConfigured
-                  ? () => _showAIExplanation(context, q, currentIndex)
-                  : () => _showApiKeyDialog(context),
-              tooltip: 'Refresh AI Explanation',
-              style: IconButton.styleFrom(
-                backgroundColor: theme.colorScheme.secondaryContainer
-                    .withOpacity(0.3),
-                padding: const EdgeInsets.all(8),
-              ),
-            )
-          else
-            IconButton(
-              icon: Icon(
-                Icons.refresh_rounded,
-                color: theme.colorScheme.outline,
-                size: 20,
-              ),
-              onPressed: null,
-              tooltip: 'Maximum regeneration attempts reached',
-              style: IconButton.styleFrom(
-                backgroundColor: theme.colorScheme.surfaceContainerHighest
-                    .withOpacity(0.3),
-                padding: const EdgeInsets.all(8),
-              ),
-            ),
-          const SizedBox(width: 4),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            padding: const EdgeInsets.all(6),
             decoration: BoxDecoration(
-              color: _regenerationAttempts >= _maxRegenerationAttempts
-                  ? theme.colorScheme.outline.withOpacity(0.2)
-                  : theme.colorScheme.secondaryContainer,
-              borderRadius: BorderRadius.circular(12),
+              color: theme.colorScheme.primaryContainer,
+              borderRadius: BorderRadius.circular(6),
             ),
-            child: Text(
-              '${_maxRegenerationAttempts - _regenerationAttempts}',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: _regenerationAttempts >= _maxRegenerationAttempts
-                    ? theme.colorScheme.outline
-                    : theme.colorScheme.onSecondaryContainer,
-                fontWeight: FontWeight.w600,
-              ),
+            child: Icon(
+              Icons.star_rounded,
+              color: theme.colorScheme.onPrimaryContainer,
+              size: 16,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Question Mastery',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                Text(
+                  'Question answered correctly',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
-      );
-    }
-
-    return const SizedBox.shrink();
+      ),
+      content: Text(
+        'You answered this question correctly. You can mark it as mastered or add it to your practice queue for reinforcement.',
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+        ),
+      ),
+      actions: [
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => _addToQueueAndContinue(_getQuestionId(q)),
+                icon: const Icon(Icons.queue_rounded, size: 16),
+                label: const Text('Practice More'),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: () => _markAsMasteredAndContinue(_getQuestionId(q)),
+                icon: const Icon(Icons.star_rounded, size: 16),
+                label: const Text('Mark Mastered'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: theme.colorScheme.secondary,
+                  foregroundColor: theme.colorScheme.onSecondary,
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
   }
 
-  Widget _buildRepeatPrompt() {
-    final theme = Theme.of(context);
-    final q = queue[currentIndex];
+  void _addToQueueAndContinue(String questionId) {
+    setState(() {
+      showMasteryPrompt = false;
+    });
+
+    // Get the current question
+    final currentQ = currentQuestion;
+    if (currentQ != null) {
+      // Add to Queue List and Mistake List
+      _addToQueueList(currentQ);
+      _addToMistakes(questionId);
+      print('Debug: Question added to Queue List and Mistake List');
+    }
+
+    // Move to next question
+    _next();
+  }
+
+  void _markAsMasteredAndContinue(String questionId) {
+    setState(() {
+      showMasteryPrompt = false;
+    });
+
+    // Mark as mastered
+    _markAsMastered(questionId);
+    print('Debug: Question marked as mastered');
+
+    // Move to next question
+    _next();
+  }
+
+  Future<void> _saveAIExplanation(
+    Map<String, dynamic> question,
+    String explanation,
+  ) async {
+    try {
+      // Save to the question data
+      question['ai_explanation'] = explanation;
+
+      // Save to ExamProvider for persistence across screens
+      final examProvider = Provider.of<ExamProvider>(context, listen: false);
+      final originalQuestionIndex = widget.questions.indexOf(question);
+      if (originalQuestionIndex != -1) {
+        await examProvider.updateQuestionAIExplanation(
+          widget.examId,
+          originalQuestionIndex,
+          explanation,
+        );
+      }
+
+      print(
+        'AI explanation saved for question: ${question['text']?.substring(0, 50)}...',
+      );
+    } catch (e) {
+      print('Error saving AI explanation: $e');
+    }
+  }
+
+  void _handleAnswerSubmission(bool correct) {
+    if (currentQuestion == null) {
+      print('Debug: No question available for answer submission');
+      return;
+    }
+
+    final q = currentQuestion!;
     final questionId = _getQuestionId(q);
-    final currentAttempts = masteryAttempts[questionId] ?? 0;
-    final attemptsNeeded = 3 - currentAttempts;
+
+    if (correct) {
+      if (!isInQueuePhase) {
+        // Question List Phase: Correct answer
+        print(
+          'Debug: Question List phase - correct answer, showing mastery prompt',
+        );
+        setState(() {
+          showMasteryPrompt = true;
+        });
+        // User will choose whether to mark as mastered or add to Queue List
+      } else {
+        // Queue List Phase: Correct answer
+        final currentStreak = questionStreaks[questionId] ?? 0;
+        final newStreak = currentStreak + 1;
+
+        setState(() {
+          questionStreaks[questionId] = newStreak;
+        });
+
+        print('Debug: Queue List phase - correct answer, streak: $newStreak/3');
+
+        if (newStreak >= 3) {
+          // Question mastered (3 correct answers in a row)
+          print('Debug: Question $questionId mastered (3 correct in a row)');
+          setState(() {
+            showCorrectAnswerPrompt = true;
+            isCorrectAnswerPrompt = true;
+          });
+          print('Debug: Queue List phase - showing mastery completion prompt');
+          // Don't call _next() yet - wait for user to acknowledge
+        } else {
+          // Show streak update prompt before continuing
+          setState(() {
+            showCorrectAnswerPrompt = true;
+            isCorrectAnswerPrompt = true;
+          });
+          print('Debug: Queue List phase - showing streak update prompt');
+          // Don't call _next() yet - wait for user to acknowledge
+        }
+      }
+    } else {
+      // Incorrect answer
+      if (!isInQueuePhase) {
+        // Question List Phase: Incorrect answer - show correct answer first
+        print(
+          'Debug: Question List phase - incorrect answer, showing correct answer',
+        );
+        _addToMistakes(questionId);
+        _addToQueueList(q);
+        setState(() {
+          showCorrectAnswerPrompt = true;
+          isCorrectAnswerPrompt = false;
+        });
+        // Don't call _next() yet - wait for user to acknowledge correct answer
+      } else {
+        // Queue List Phase: Incorrect answer - reset streak and show correct answer
+        setState(() {
+          questionStreaks[questionId] = 0;
+          showCorrectAnswerPrompt = true;
+        });
+        print(
+          'Debug: Queue List phase - incorrect answer, streak reset to 0, showing correct answer',
+        );
+        // Don't call _next() yet - wait for user to acknowledge correct answer
+      }
+    }
+
+    // Increment processed questions count
+    setState(() {
+      processedQuestions++;
+    });
+
+    // Save session after each question
+    _saveSession();
+  }
+
+  // New method to handle user acknowledgment of correct answer
+  void _acknowledgeCorrectAnswer() {
+    final q = currentQuestion;
+    if (q != null && isInQueuePhase) {
+      final questionId = _getQuestionId(q);
+      final currentStreak = questionStreaks[questionId] ?? 0;
+
+      // Check if this question just reached 3/3 and should be removed
+      if (currentStreak >= 3) {
+        print('Debug: Removing mastered question $questionId from Queue List');
+        _removeFromQueue(questionId);
+
+        // Check if queue is now empty after removal
+        if (queueList.isEmpty) {
+          print('Debug: Queue List is now empty, finishing session');
+          setState(() {
+            showCorrectAnswerPrompt = false;
+            isCorrectAnswerPrompt = false;
+          });
+          _finish();
+          return;
+        }
+      }
+    }
+
+    setState(() {
+      showCorrectAnswerPrompt = false;
+      isCorrectAnswerPrompt = false;
+    });
+    _next();
+  }
+
+  void _submit() {
+    // Safety check: ensure we have questions and current index is valid
+    if (currentQuestions.isEmpty || currentIndex >= currentQuestions.length) {
+      print(
+        'Debug: No questions available or invalid currentIndex: $currentIndex, questions length: ${currentQuestions.length}',
+      );
+      return;
+    }
+
+    final q = currentQuestion!;
+    final isHotspot = q['type'] == 'hotspot';
+    final isMulti = _isMultiAnswer(q);
+
+    // Debug logging to track submission
+    print('Debug: _submit called - isHotspot: $isHotspot, isMulti: $isMulti');
+    print('Debug: selectedOption: $selectedOption');
+    print('Debug: selectedOptions: $selectedOptions');
+    print('Debug: hotspotSelectedOrder: $hotspotSelectedOrder');
+
+    // Additional safety check for hotspot questions
+    if (isHotspot && hotspotSelectedOrder.isEmpty) {
+      print('Debug: Hotspot question but no selection made');
+      return;
+    }
+
+    // Additional safety check for multi-answer questions (but not hotspot)
+    if (isMulti && !isHotspot && selectedOptions.isEmpty) {
+      print('Debug: Multi-answer question but no selection made');
+      return;
+    }
+
+    // Additional safety check for single-answer questions
+    if (!isHotspot && !isMulti && selectedOption == null) {
+      print('Debug: Single-answer question but no selection made');
+      return;
+    }
+
+    bool correct = false;
+
+    if (isHotspot) {
+      final correctIndices = _getCorrectIndices(q);
+      print('Debug RandomQuiz: Hotspot question');
+      print('Debug RandomQuiz: Question type: ${q['type']}');
+      print('Debug RandomQuiz: User answer: $hotspotSelectedOrder');
+      print('Debug RandomQuiz: Correct indices: $correctIndices');
+      print('Debug RandomQuiz: Options: ${q['options']}');
+      print('Debug RandomQuiz: Answers raw: ${q['answers']}');
+      print('Debug RandomQuiz: Question ID: ${_getQuestionId(q)}');
+
+      // Check if user has made any selection
+      if (hotspotSelectedOrder.isEmpty) {
+        print('Debug RandomQuiz: No user selection made');
+        correct = false;
+      } else if (correctIndices.isEmpty) {
+        print('Debug RandomQuiz: No correct indices found');
+        correct = false;
+      } else {
+        // Compare the selected order with correct order
+        print(
+          'Debug RandomQuiz: Comparing lengths - User: ${hotspotSelectedOrder.length}, Correct: ${correctIndices.length}',
+        );
+        print('Debug RandomQuiz: User order: $hotspotSelectedOrder');
+        print('Debug RandomQuiz: Correct order: $correctIndices');
+
+        if (hotspotSelectedOrder.length == correctIndices.length) {
+          bool allMatch = true;
+          for (int i = 0; i < correctIndices.length; i++) {
+            if (hotspotSelectedOrder[i] != correctIndices[i]) {
+              print(
+                'Debug RandomQuiz: Mismatch at position $i - User: ${hotspotSelectedOrder[i]}, Correct: ${correctIndices[i]}',
+              );
+              allMatch = false;
+              break;
+            }
+          }
+          correct = allMatch;
+        } else {
+          print('Debug RandomQuiz: Length mismatch');
+          correct = false;
+        }
+      }
+
+      print('Debug RandomQuiz: Is correct: $correct');
+    } else if (isMulti) {
+      final options = q['options'] as List;
+      final answersRaw = q['answers'] ?? q['answer'];
+      List<int> correctIndices = [];
+      if (answersRaw is List && answersRaw.isNotEmpty) {
+        // Try to match by letter if possible
+        correctIndices = answersRaw.map((a) {
+          final aStr = a.toString().trim();
+          if (aStr.length == 1 &&
+              RegExp(r'^[A-Z]$', caseSensitive: false).hasMatch(aStr)) {
+            return aStr.toUpperCase().codeUnitAt(0) - 65;
+          }
+          // fallback to numeric or text match
+          if (int.tryParse(aStr) != null) {
+            return int.tryParse(aStr)!;
+          }
+          return options.indexWhere((o) => o.toString().trim() == aStr);
+        }).toList();
+      } else if (answersRaw is String && answersRaw.isNotEmpty) {
+        correctIndices = answersRaw.split('|').map((a) {
+          final aStr = a.trim();
+          if (aStr.length == 1 &&
+              RegExp(r'^[A-Z]$', caseSensitive: false).hasMatch(aStr)) {
+            return aStr.toUpperCase().codeUnitAt(0) - 65;
+          }
+          // fallback to numeric or text match
+          if (int.tryParse(aStr) != null) {
+            return int.tryParse(aStr)!;
+          }
+          return options.indexWhere((o) => o.toString().trim() == aStr);
+        }).toList();
+      }
+
+      final selectedSet = selectedOptions.toSet();
+      final correctSet = correctIndices.toSet();
+      correct =
+          selectedSet.length == correctSet.length &&
+          selectedSet.difference(correctSet).isEmpty;
+    } else {
+      if (selectedOption == null) return;
+      final options = q['options'] as List;
+      final answersRaw = q['answers'] ?? q['answer'];
+      List<int> correctIndices = [];
+
+      print('Debug: Single-answer question checking');
+      print('Debug: selectedOption: $selectedOption');
+      print('Debug: answersRaw: $answersRaw');
+      print('Debug: options: $options');
+
+      if (answersRaw is List && answersRaw.isNotEmpty) {
+        // Try to match by letter if possible
+        correctIndices = answersRaw.map((a) {
+          final aStr = a.toString().trim();
+          print('Debug: Processing answer: $aStr');
+          if (aStr.length == 1 &&
+              RegExp(r'^[A-Z]$', caseSensitive: false).hasMatch(aStr)) {
+            final index = aStr.toUpperCase().codeUnitAt(0) - 65;
+            print('Debug: Letter match - $aStr -> index $index');
+            return index;
+          }
+          // fallback to numeric or text match
+          if (int.tryParse(aStr) != null) {
+            final index = int.tryParse(aStr)!;
+            print('Debug: Numeric match - $aStr -> index $index');
+            return index;
+          }
+          final index = options.indexWhere((o) => o.toString().trim() == aStr);
+          print('Debug: Text match - $aStr -> index $index');
+          return index;
+        }).toList();
+      } else if (answersRaw is String && answersRaw.isNotEmpty) {
+        // Try to match by letter if possible
+        final aStr = answersRaw.trim();
+        print('Debug: Processing string answer: $aStr');
+        if (aStr.length == 1 &&
+            RegExp(r'^[A-Z]$', caseSensitive: false).hasMatch(aStr)) {
+          correctIndices = [aStr.toUpperCase().codeUnitAt(0) - 65];
+          print('Debug: Letter match - $aStr -> index ${correctIndices[0]}');
+        } else if (int.tryParse(aStr) != null) {
+          // fallback to numeric
+          correctIndices = [int.tryParse(aStr)!];
+          print('Debug: Numeric match - $aStr -> index ${correctIndices[0]}');
+        } else {
+          // fallback to text match
+          final idx = options.indexWhere((o) => o.toString().trim() == aStr);
+          if (idx >= 0) correctIndices = [idx];
+          print('Debug: Text match - $aStr -> index $idx');
+        }
+      }
+
+      print('Debug: Final correctIndices: $correctIndices');
+      correct = correctIndices.contains(selectedOption);
+      print(
+        'Debug: Is correct: $correct (selectedOption: $selectedOption, contains: ${correctIndices.contains(selectedOption)})',
+      );
+    }
+
+    print(
+      'Debug: Submit - currentIndex: $currentIndex, questions length: ${currentQuestions.length}, correct: $correct',
+    );
+
+    setState(() {
+      submitted = true;
+      isCorrect = correct;
+      showMasteryPrompt = false;
+    });
+
+    _handleAnswerSubmission(correct);
+  }
+
+  void _resetAnswerStates() {
+    print(
+      'Debug: Resetting answer states - selectedOption: $selectedOption, selectedOptions: $selectedOptions, hotspotSelectedOrder: $hotspotSelectedOrder',
+    );
+    selectedOption = null;
+    selectedOptions.clear();
+    hotspotSelectedOrder.clear();
+    submitted = false;
+    isCorrect = false;
+    showMasteryPrompt = false;
+    showCorrectAnswerPrompt = false;
+    _aiExplanation = null;
+    _isLoadingExplanation = false;
+    _regenerationAttempts = 0;
+    print('Debug: Answer states reset complete');
+  }
+
+  void _next() {
+    print(
+      'Debug: _next - before: currentIndex: $currentIndex, questions length: ${currentQuestions.length}',
+    );
+
+    // Reset answer states FIRST to prevent carryover
+    _resetAnswerStates();
+    print('Debug: _next - answer states reset before moving to next question');
+
+    setState(() {
+      if (!isInQueuePhase) {
+        // Question List Phase: Remove the current question since it's been processed
+        if (currentIndex < currentQuestions.length) {
+          final removedQuestion = currentQuestions.removeAt(currentIndex);
+          print(
+            'Debug: _next - removed question from Question List: ${removedQuestion['text']?.substring(0, 50)}...',
+          );
+        }
+      } else {
+        // Queue List Phase: Move to next question (don't remove)
+        currentIndex = (currentIndex + 1) % currentQuestions.length;
+        print(
+          'Debug: _next - moved to next question in Queue List: $currentIndex',
+        );
+      }
+
+      // Check if we have more questions to process in current phase
+      if (currentQuestions.isNotEmpty) {
+        print(
+          'Debug: _next - after: currentIndex: $currentIndex, questions length: ${currentQuestions.length}',
+        );
+        print(
+          'Debug: _next - next question: ${currentQuestions[currentIndex]['text']?.substring(0, 50)}...',
+        );
+      } else {
+        // No more questions in current phase
+        if (!isInQueuePhase && queueList.isNotEmpty) {
+          // Switch to Queue List phase and shuffle it
+          print('Debug: _next - switching to Queue List phase');
+          setState(() {
+            isInQueuePhase = true;
+            currentIndex = 0;
+            // Shuffle the Queue List when switching to Queue List phase
+            final random = Random();
+            queueList.shuffle(random);
+            print(
+              'Debug: Queue List shuffled with ${queueList.length} questions',
+            );
+          });
+        } else {
+          // No more questions in either phase - session is complete
+          print('Debug: _next - no more questions, finishing session');
+          _finish();
+        }
+      }
+    });
+  }
+
+  void _finish() async {
+    setState(() {
+      // Mark as finished
+      submitted = true;
+      showMasteryPrompt = false;
+    });
+
+    print(
+      'Debug: Session finishing - Total mistakes before save: ${mistakeQuestions.length}',
+    );
+    print('Debug: Session finishing - Mistake questions: $mistakeQuestions');
+
+    // Save final progress
+    await _saveProgress();
+
+    print('Debug: Progress saved - Mistake questions should be preserved');
+
+    // Clear session data since session is complete
+    _clearSession();
+
+    print('Debug: Session completed and cleared');
+  }
+
+  // Manual session save method (can be called from UI)
+  Future<void> _manualSaveSession() async {
+    await _saveSession();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('Session saved'),
+        backgroundColor: Theme.of(context).colorScheme.primary,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+
+  Widget _buildCorrectAnswerPrompt() {
+    final theme = Theme.of(context);
+    final q = currentQuestion;
+    if (q == null) return const SizedBox.shrink();
+
+    final isHotspot = q['type'] == 'hotspot';
 
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: theme.colorScheme.shadow.withOpacity(0.1),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        color: isCorrectAnswerPrompt
+            ? theme.colorScheme.primaryContainer.withValues(alpha: 0.3)
+            : theme.colorScheme.errorContainer.withValues(alpha: 0.3),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: isCorrectAnswerPrompt
+              ? theme.colorScheme.primary.withValues(alpha: 0.2)
+              : theme.colorScheme.error.withValues(alpha: 0.2),
+          width: 1,
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primaryContainer,
-                  borderRadius: BorderRadius.circular(8),
+          if (isCorrectAnswerPrompt) ...[
+            // Streak update for correct answer in queue phase
+            Row(
+              children: [
+                Icon(Icons.check_circle_rounded, color: Colors.green, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  'Streak Updated',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: Colors.green,
+                  ),
                 ),
-                child: Icon(
-                  Icons.repeat_rounded,
-                  color: theme.colorScheme.onPrimaryContainer,
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Great job! Your streak is now ${questionStreaks[_getQuestionId(q)]}/3',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.w500,
+                color: theme.colorScheme.onSurface,
+              ),
+            ),
+            const SizedBox(height: 12),
+          ] else if (isHotspot) ...[
+            // Correct answer display for incorrect answers (hotspot only)
+            Row(
+              children: [
+                Icon(
+                  Icons.lightbulb_rounded,
+                  color: theme.colorScheme.error,
                   size: 20,
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Mastery Progress',
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '$currentAttempts/3 correct answers',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
+                const SizedBox(width: 8),
+                Text(
+                  'Correct Answer',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: theme.colorScheme.error,
+                  ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'You need $attemptsNeeded more correct answer${attemptsNeeded == 1 ? '' : 's'} to master this question. What would you like to do?',
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
+              ],
             ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => _repeat(true),
-                  icon: const Icon(Icons.refresh_rounded),
-                  label: const Text('Review Later'),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
+            const SizedBox(height: 8),
+            Text(
+              _getCorrectAnswerText(q),
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.w500,
+                color: theme.colorScheme.onSurface,
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _acknowledgeCorrectAnswer,
+              icon: Icon(
+                isInQueuePhase && queueList.length == 1
+                    ? Icons.flag_rounded
+                    : Icons.arrow_forward_rounded,
+              ),
+              label: Text(
+                isInQueuePhase && queueList.length == 1
+                    ? 'Finish Session'
+                    : 'Continue to Next Question',
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isInQueuePhase && queueList.length == 1
+                    ? theme.colorScheme.secondary
+                    : theme.colorScheme.primary,
+                foregroundColor: isInQueuePhase && queueList.length == 1
+                    ? theme.colorScheme.onSecondary
+                    : theme.colorScheme.onPrimary,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
                 ),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: () => _markAsMasteredAndContinue(questionId),
-                  icon: const Icon(Icons.star_rounded),
-                  label: const Text('Mark Mastered'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: theme.colorScheme.secondary,
-                    foregroundColor: theme.colorScheme.onSecondary,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  void _markAsMasteredAndContinue(String questionId) {
-    setState(() {
-      showRepeatPrompt = false;
-    });
-
-    // Mark as mastered immediately
-    _markAsMastered(questionId);
-
-    // Move to next question
+  Future<void> _continueSession() async {
+    // Load existing session
+    await _loadSession();
+    // Continue from the last processed question
     _next();
+  }
+
+  Future<void> _checkForExistingSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final sessionString = prefs.getString(_sessionKey);
+
+      if (sessionString != null) {
+        final sessionData = jsonDecode(sessionString) as Map<String, dynamic>;
+
+        // Check if this session is for the same exam and range
+        if (sessionData['examId'] == widget.examId &&
+            sessionData['start'] == widget.start &&
+            sessionData['end'] == widget.end) {
+          // Check if session is not too old (72 hours)
+          final timestamp = sessionData['timestamp'] as int;
+          final sessionTime = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          final now = DateTime.now();
+          final difference = now.difference(sessionTime);
+
+          if (difference.inHours < 72) {
+            // Show dialog to let user choose
+            _showSessionChoiceDialog();
+            return;
+          }
+        }
+      }
+
+      // No valid session found, start fresh
+      _initializeQueue();
+    } catch (e) {
+      print('Debug: Error checking for existing session: $e');
+      _initializeQueue();
+    }
+  }
+
+  void _showSessionChoiceDialog() {
+    final theme = Theme.of(context);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primaryContainer,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(
+                Icons.play_arrow_rounded,
+                color: theme.colorScheme.onPrimaryContainer,
+                size: 20,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              'Continue Previous Session?',
+              style: theme.textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          'A previous session was found for this range. Would you like to continue where you left off or start a new session?',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _initializeQueue(); // Start fresh
+            },
+            child: const Text('Start New'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _loadSession(); // Continue session
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: theme.colorScheme.primary,
+              foregroundColor: theme.colorScheme.onPrimary,
+            ),
+            child: const Text('Continue Session'),
+          ),
+        ],
+      ),
+    );
   }
 }
