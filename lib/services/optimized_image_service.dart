@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/foundation.dart';
 import 'exam_info_cache_service.dart';
 import '../config/server_config.dart';
 import 'dart:convert'; // Added for jsonEncode and jsonDecode
@@ -117,16 +119,46 @@ class OptimizedImageService {
         imageUrl,
       );
       if (cachedPath != null) {
-        final file = File(cachedPath);
-        if (await file.exists()) {
-          print('📋 Image already cached: ${path.basename(imageUrl)}');
+        // On web, just verify it's still a valid URL
+        if (kIsWeb) {
+          print('📋 Image cached for web: ${path.basename(imageUrl)}');
           return cachedPath;
+        } else {
+          final file = File(cachedPath);
+          if (await file.exists()) {
+            print('📋 Image already cached: ${path.basename(imageUrl)}');
+            return cachedPath;
+          }
         }
       }
 
       print('⬇️ Downloading: ${path.basename(imageUrl)}');
 
-      // Try to create images directory, but handle path_provider errors gracefully
+      // Web platform: Skip local file storage, just cache the URL
+      if (kIsWeb) {
+        print('🌐 Web platform detected, caching URL for offline access');
+        try {
+          // Test if image is accessible
+          final response = await http
+              .head(Uri.parse(imageUrl))
+              .timeout(const Duration(seconds: 10));
+
+          if (response.statusCode == 200) {
+            // Cache the URL itself for web platform
+            await ExamInfoCacheService.cacheImageData(imageUrl, imageUrl);
+            print('✅ Web: Cached URL for ${path.basename(imageUrl)}');
+            return imageUrl;
+          } else {
+            print('❌ Web: Image not accessible (${response.statusCode})');
+            return null;
+          }
+        } catch (e) {
+          print('❌ Web: Error testing image accessibility: $e');
+          return null;
+        }
+      }
+
+      // Mobile/Desktop: Try to create images directory and download
       try {
         final appDir = await getApplicationDocumentsDirectory();
         final imagesDir = Directory(path.join(appDir.path, 'images'));
@@ -236,9 +268,43 @@ class OptimizedImageService {
           }
         }
 
-        // If no local cache, return the processed URL directly
-        print('📡 Using processed image URL directly');
-        return imageUrl;
+        // NEW: Test if processed image is actually available (not 404)
+        try {
+          print('🔍 Verifying processed image availability...');
+          final testResponse = await http
+              .head(Uri.parse(imageUrl))
+              .timeout(const Duration(seconds: 10));
+
+          if (testResponse.statusCode == 404) {
+            print(
+              '❌ Processed image not found (404), attempting to reprocess from original URL...',
+            );
+
+            // Try to find the original URL from cache metadata
+            final originalUrl = await _getOriginalUrlFromProcessed(imageUrl);
+            if (originalUrl != null) {
+              print('🔄 Found original URL, reprocessing: $originalUrl');
+              return await _reprocessOriginalImage(originalUrl);
+            } else {
+              print(
+                '⚠️ Could not find original URL, using processed URL as fallback',
+              );
+              return imageUrl;
+            }
+          } else if (testResponse.statusCode == 200) {
+            print('✅ Processed image is available');
+            return imageUrl;
+          } else {
+            print(
+              '⚠️ Unexpected response code ${testResponse.statusCode}, using URL as fallback',
+            );
+            return imageUrl;
+          }
+        } catch (e) {
+          print('⚠️ Error checking processed image availability: $e');
+          // If we can't check, just return the URL and let the UI handle errors
+          return imageUrl;
+        }
       }
 
       // For external URLs, check cache first
@@ -427,6 +493,7 @@ class OptimizedImageService {
   static void _loadImageAsync(String imagePath) {
     loadImage(imagePath).catchError((e) {
       print('Error preloading image: $e');
+      return null; // Return null on error
     });
   }
 
@@ -453,6 +520,122 @@ class OptimizedImageService {
       'maxSize': _maxMemoryCacheSize,
       'loadingCount': _loadingCompleters.length,
     };
+  }
+
+  // NEW: Get original URL from processed URL by checking reverse mapping
+  static Future<String?> _getOriginalUrlFromProcessed(
+    String processedUrl,
+  ) async {
+    try {
+      // Extract filename from processed URL
+      final uri = Uri.parse(processedUrl);
+      final fileName = path.basename(uri.path);
+
+      // Look through all cached entries to find the original URL that maps to this processed URL
+      final prefs = await SharedPreferences.getInstance();
+      final keys = prefs.getKeys();
+
+      for (final key in keys) {
+        if (key.startsWith('exam_image_cache_')) {
+          try {
+            final cacheData = prefs.getString(key);
+            if (cacheData != null) {
+              final data = jsonDecode(cacheData);
+              final localPath = data['localPath'] as String?;
+
+              // Check if this cache entry points to our processed URL
+              if (localPath != null && localPath.contains(fileName)) {
+                // Extract original URL from cache key
+                final encodedUrl = key.substring('exam_image_cache_'.length);
+                final originalUrl = Uri.decodeComponent(encodedUrl);
+
+                // Make sure it's not another processed URL
+                if (!originalUrl.contains('image-processing-server') &&
+                    !originalUrl.contains('onrender.com')) {
+                  print('✅ Found original URL: $originalUrl');
+                  return originalUrl;
+                }
+              }
+            }
+          } catch (e) {
+            // Continue checking other entries
+            continue;
+          }
+        }
+      }
+
+      print('❌ Could not find original URL for processed image');
+      return null;
+    } catch (e) {
+      print('❌ Error finding original URL: $e');
+      return null;
+    }
+  }
+
+  // NEW: Reprocess original image URL
+  static Future<String?> _reprocessOriginalImage(String originalUrl) async {
+    try {
+      print('🔄 Reprocessing original image: ${path.basename(originalUrl)}');
+
+      // Check server health first
+      final isServerHealthy = await _checkServerHealth();
+      if (!isServerHealthy) {
+        print('⚠️ Server is not healthy, falling back to original URL');
+        return originalUrl;
+      }
+
+      // Process the original URL through the server
+      final response = await http
+          .post(
+            Uri.parse(ServerConfig.processImagesUrl),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'imageUrls': [originalUrl],
+            }),
+          )
+          .timeout(ServerConfig.requestTimeout);
+
+      if (response.statusCode == 200) {
+        final result = jsonDecode(response.body) as Map<String, dynamic>;
+
+        if (result['success'] == true && result['processedImages'] != null) {
+          final processedImages = result['processedImages'] as List;
+          if (processedImages.isNotEmpty) {
+            final newProcessedUrl = ServerConfig.getProcessedImageUrl(
+              processedImages.first,
+            );
+
+            // Cache the new processed URL
+            await ExamInfoCacheService.cacheImageData(
+              originalUrl,
+              newProcessedUrl,
+            );
+
+            print(
+              '✅ Successfully reprocessed image: ${path.basename(originalUrl)}',
+            );
+            return newProcessedUrl;
+          }
+        }
+
+        // Check for errors in the response
+        if (result['errors'] != null && (result['errors'] as List).isNotEmpty) {
+          print(
+            '⚠️ Server reported errors during reprocessing: ${result['errors']}',
+          );
+        }
+      } else {
+        print('❌ Reprocessing failed with status ${response.statusCode}');
+      }
+
+      // If reprocessing fails, fall back to original URL
+      print('🔄 Falling back to original URL');
+      return originalUrl;
+    } catch (e) {
+      print('❌ Error reprocessing image: $e');
+      // Fall back to original URL
+      return originalUrl;
+    }
   }
 
   // Preload images for a list of questions
