@@ -6,8 +6,10 @@ import 'package:path/path.dart' as p;
 import 'package:go_router/go_router.dart';
 import '../utils/csv_question_parser.dart';
 import '../models/imported_exam.dart';
+import '../models/exam_question.dart';
 import '../data/imported_exam_storage.dart';
 import '../providers/exam_provider.dart';
+import '../services/user_exam_service.dart';
 import 'package:provider/provider.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -685,13 +687,37 @@ class _EnhancedCsvImportScreenState extends State<EnhancedCsvImportScreen> {
         importedAt: DateTime.now(),
       );
 
-      // Save exam
+      // Save exam to admin storage
       if (_overwriteExisting) {
         await ImportedExamStorage.removeExam(existingExam.id);
         await ImportedExamStorage.addExam(exam);
       } else {
         await ImportedExamStorage.addExam(exam);
       }
+
+      // Also save to user exam service for user access
+      // Convert Question objects to ExamQuestion objects
+      final examQuestions = _parsedQuestions.map((q) => ExamQuestion(
+        id: q.id,
+        type: q.type,
+        text: q.text,
+        questionImages: q.questionImages,
+        answerImages: q.answerImages,
+        options: q.choices.map((c) => c.text).toList(),
+        answers: q.correctIndices.map((i) => q.choices[i].text).toList(),
+        explanation: null,
+      )).toList();
+
+      final examData = {
+        'id': exam.id,
+        'title': _examName!,
+        'questions': examQuestions.map((q) => q.toMap()!).toList(),
+        'questionCount': _parsedQuestions.length,
+        'category': 'User Import',
+        'importDate': DateTime.now().toIso8601String(),
+      };
+
+      await UserExamService.addUserImportedExam(examData);
 
       // Update ExamProvider
       final examProvider = Provider.of<ExamProvider>(context, listen: false);

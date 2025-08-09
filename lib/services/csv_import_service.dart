@@ -6,6 +6,7 @@ import '../models/exam_question.dart';
 import '../models/imported_exam.dart';
 import '../data/imported_exam_storage.dart';
 import '../services/admin_service.dart';
+import '../services/user_exam_service.dart';
 import '../config/server_config.dart';
 
 class CsvImportService {
@@ -267,8 +268,28 @@ class CsvImportService {
     // Convert letter answers (A, B, C, D) to full option text
     final answers = <String>[];
     for (final answer in rawAnswers) {
-      if (answer.length == 1 && RegExp(r'^[A-Z]$').hasMatch(answer)) {
-        // This is a letter answer, find the corresponding option
+      // Handle multiple letter answers separated by | (e.g., "A|B")
+      if (answer.contains('|')) {
+        final letterAnswers = answer.split('|');
+        for (final letterAnswer in letterAnswers) {
+          final trimmedLetter = letterAnswer.trim();
+          if (trimmedLetter.length == 1 &&
+              RegExp(r'^[A-Z]$').hasMatch(trimmedLetter)) {
+            // This is a letter answer, find the corresponding option
+            final optionIndex = trimmedLetter.codeUnitAt(0) - 'A'.codeUnitAt(0);
+            if (optionIndex >= 0 && optionIndex < options.length) {
+              answers.add(options[optionIndex]);
+            } else {
+              // If option not found, keep the letter
+              answers.add(trimmedLetter);
+            }
+          } else {
+            // This is already full text, keep as is
+            answers.add(trimmedLetter);
+          }
+        }
+      } else if (answer.length == 1 && RegExp(r'^[A-Z]$').hasMatch(answer)) {
+        // Single letter answer
         final optionIndex = answer.codeUnitAt(0) - 'A'.codeUnitAt(0);
         if (optionIndex >= 0 && optionIndex < options.length) {
           answers.add(options[optionIndex]);
@@ -276,8 +297,20 @@ class CsvImportService {
           // If option not found, keep the letter
           answers.add(answer);
         }
+      } else if (answer.length > 1 && RegExp(r'^[A-Z]+$').hasMatch(answer)) {
+        // Multiple letters without separator (e.g., "DCA")
+        for (int i = 0; i < answer.length; i++) {
+          final letter = answer[i];
+          final optionIndex = letter.codeUnitAt(0) - 'A'.codeUnitAt(0);
+          if (optionIndex >= 0 && optionIndex < options.length) {
+            answers.add(options[optionIndex]);
+          } else {
+            // If option not found, keep the letter
+            answers.add(letter);
+          }
+        }
       } else {
-        // This is already a full text answer
+        // This is already full text, keep as is
         answers.add(answer);
       }
     }
@@ -403,6 +436,18 @@ class CsvImportService {
         examName, // Use the custom exam name instead of the generated ID
         questions,
       );
+
+      // Also save to UserExamService for user access
+      final examData = {
+        'id': importedExam.id,
+        'title': examName,
+        'questions': questions.map((q) => q.toMap()).toList(),
+        'questionCount': questions.length,
+        'category': category,
+        'importDate': DateTime.now().toIso8601String(),
+      };
+
+      await UserExamService.addUserImportedExam(examData);
 
       return {
         'success': true,
