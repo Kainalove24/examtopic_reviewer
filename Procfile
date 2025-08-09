@@ -1,1 +1,1 @@
-web: gunicorn --config gunicorn.conf.py api.process-images:app 
+web: gunicorn --config gunicorn.conf.py api:app 
