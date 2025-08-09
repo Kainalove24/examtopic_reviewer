@@ -3,9 +3,11 @@ services:
     name: examtopic_reviewer_api
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: gunicorn api:app --config gunicorn.conf.py
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.18
       - key: CLOUDINARY_API_SECRET
         sync: false
       - key: CLOUDINARY_API_KEY
