@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn api.health:app --config gunicorn.conf.py
+    startCommand: gunicorn api:app --config gunicorn.conf.py
     envVars:
       - key: CLOUDINARY_API_SECRET
         sync: false
