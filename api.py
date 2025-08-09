@@ -15,9 +15,15 @@ try:
     import cloudinary.api
     import cloudinary.exceptions
     CLOUDINARY_AVAILABLE = True
-except ImportError:
+    print("🔍 DEBUG: Cloudinary imports successful")
+except ImportError as e:
     CLOUDINARY_AVAILABLE = False
     cloudinary = None
+    print(f"🔍 DEBUG: Cloudinary import failed: {e}")
+except Exception as e:
+    CLOUDINARY_AVAILABLE = False
+    cloudinary = None
+    print(f"🔍 DEBUG: Unexpected error importing Cloudinary: {e}")
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -47,8 +53,10 @@ if CLOUDINARY_AVAILABLE:
         ])
         if CLOUDINARY_ENABLED:
             logger.info("✅ Cloudinary configuration loaded successfully")
+            print("🔍 DEBUG: All environment variables found and configured")
         else:
             logger.warning("⚠️ Cloudinary environment variables not found, using local storage")
+            print(f"🔍 DEBUG: Missing env vars - CLOUD_NAME: {bool(os.environ.get('CLOUDINARY_CLOUD_NAME'))}, API_KEY: {bool(os.environ.get('CLOUDINARY_API_KEY'))}, API_SECRET: {bool(os.environ.get('CLOUDINARY_API_SECRET'))}")
     except Exception as e:
         logger.error(f"❌ Failed to configure Cloudinary: {e}")
         CLOUDINARY_ENABLED = False
